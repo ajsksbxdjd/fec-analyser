@@ -203,24 +203,6 @@ Open **http://localhost:3000** in your browser. Both terminals must stay running
 
 ---
 
-## Quick-start checklist
-
-```
-FIRST TIME ONLY (do once after cloning):
-  [ ] cd backend
-  [ ] python -m venv venv
-  [ ] Activate venv  (venv\Scripts\activate  or  source venv/bin/activate)
-  [ ] pip install -r requirements.txt
-  [ ] mkdir storage\uploads
-  [ ] cd ../frontend
-  [ ] npm install
-
-EVERY TIME YOU WANT TO USE THE APP:
-  [ ] Terminal 1: cd backend → activate venv → uvicorn main:app --host 0.0.0.0 --reload
-  [ ] Terminal 2: cd frontend → npm run dev
-  [ ] Open http://localhost:3000
-```
-
 ---
 
 ## How to use
