@@ -21,7 +21,7 @@ A full-stack web application for automated hookworm egg detection and counting i
 |---|---|
 | Backend API | FastAPI 0.115, Uvicorn, Python 3.10+ |
 | Database | SQLite via SQLAlchemy 2.0 |
-| ML inference | Ultralytics YOLOv8s (`best.pt`) |
+| ML inference | Ultralytics YOLOv8n (`best.pt`) |
 | Frontend | Next.js 15, React 19, TypeScript |
 | Styling | Tailwind CSS v4, lucide-react |
 
