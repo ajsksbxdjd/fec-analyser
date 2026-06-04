@@ -1,5 +1,7 @@
 # Backend
 backend/storage/
+!backend/storage/models/
+!backend/storage/models/best.pt
 backend/.venv/
 backend/__pycache__/
 backend/**/__pycache__/
