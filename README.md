@@ -203,8 +203,6 @@ Open **http://localhost:3000** in your browser. Both terminals must stay running
 
 ---
 
----
-
 ## How to use
 
 1. **Create a batch** — on the workspace, enter a sample label, drop in JPG / PNG images or a ZIP archive, and click **Start analysis**
