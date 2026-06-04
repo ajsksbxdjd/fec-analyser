@@ -48,8 +48,8 @@ FYP/
 │   │   └── detector.py      # YOLOv8 model loader + batch inference
 │   └── storage/
 │       ├── models/
-│       │   └── best.pt      # ← place your trained model here
-│       └── uploads/         # uploaded images (created automatically)
+│       │   └── best.pt      # trained model weights (included in repo)
+│       └── uploads/         # uploaded images (you must create this folder)
 └── frontend/
     ├── app/
     │   ├── layout.tsx        # Root layout (Navbar, Inter font)
@@ -136,27 +136,19 @@ pip install -r requirements.txt
 
 ---
 
-### 3. Place the trained model file
+### 3. Create the uploads folder
 
-The YOLOv8 model weights are not stored in the repository (they are too large). You need to put the file in the right place manually.
-
-Create the folder:
+The uploads folder is not tracked by Git and must be created manually once:
 
 ```bash
 # Windows
-mkdir storage\models
+mkdir storage\uploads
 
 # Mac / Linux
-mkdir -p storage/models
+mkdir -p storage/uploads
 ```
 
-Then copy your trained `best.pt` into it:
-
-```
-backend/storage/models/best.pt
-```
-
-> Without this file the backend will start but inference jobs will fail with a "model not found" error.
+> The backend will fail to start without this folder. You only need to do this once — uploaded images will be saved here automatically when you use the app.
 
 ---
 
@@ -219,7 +211,7 @@ FIRST TIME ONLY (do once after cloning):
   [ ] python -m venv venv
   [ ] Activate venv  (venv\Scripts\activate  or  source venv/bin/activate)
   [ ] pip install -r requirements.txt
-  [ ] mkdir storage/models  →  copy best.pt into it
+  [ ] mkdir storage\uploads
   [ ] cd ../frontend
   [ ] npm install
 
@@ -234,7 +226,7 @@ EVERY TIME YOU WANT TO USE THE APP:
 ## How to use
 
 1. **Create a batch** — on the workspace, enter a sample label, drop in JPG / PNG images or a ZIP archive, and click **Start analysis**
-2. **Wait for inference** — a live progress bar shows how many images have been processed; the dashboard opens automatically when done
+2. **Wait for inference** — a live progress bar and elapsed timer show how many images have been processed; the dashboard opens automatically when done
 3. **Review detections**
    - **Green boxes** = accepted (confidence ≥ threshold, or manually confirmed)
    - **Amber boxes** = needs review (confidence below threshold, unconfirmed)
@@ -265,8 +257,8 @@ To tune performance, edit `backend/ml/detector.py`:
 | Problem | Fix |
 |---|---|
 | `ModuleNotFoundError` when starting backend | Virtual environment not activated — run `venv\Scripts\activate` (Windows) or `source venv/bin/activate` (Mac/Linux) before `uvicorn` |
-| Inference fails with "model not found" | Place `best.pt` in `backend/storage/models/best.pt` |
+| `Directory 'storage/uploads' does not exist` | Run `mkdir storage\uploads` inside the `backend/` folder |
 | Frontend shows network errors | Make sure the backend is running on port 8000 before opening the browser |
 | `npm run dev` fails immediately | Run `npm install` inside the `frontend/` folder first |
-| Images don't appear after upload | `backend/storage/uploads/` is created automatically on first upload — check the backend terminal for any file-permission errors |
+| Images don't appear after upload | Check that `backend/storage/uploads/` exists and the backend terminal shows no file-permission errors |
 | PowerShell blocks venv activation | Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then retry |
