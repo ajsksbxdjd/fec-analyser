@@ -1,0 +1,18 @@
+# Backend
+backend/storage/
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/*.pyc
+backend/fec.db
+*.db
+
+# Frontend
+frontend/.next/
+frontend/node_modules/
+frontend/.env.local
+
+# General
+.DS_Store
+Thumbs.db
+*.log

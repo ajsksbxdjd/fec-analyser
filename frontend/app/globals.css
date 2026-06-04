@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+/* ── Design tokens ──────────────────────────────────────────────────────────
+   Primary accent  : #2563EB  (blue-600)
+   Page bg         : #F8FAFC  (slate-50)
+   Card bg         : #FFFFFF
+   Border          : #E5E7EB  (gray-200)
+   Text primary    : #0F172A  (slate-900)
+   Text secondary  : #64748B  (slate-500)
+   Text muted      : #94A3B8  (slate-400)
+   Severity Light  : #16A34A  (green-600)
+   Severity Moderate: #D97706 (amber-600)
+   Severity Heavy  : #DC2626  (red-600)
+──────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  --background: #F8FAFC;
+  --foreground: #0F172A;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-inter);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-inter), system-ui, -apple-system, sans-serif;
+}
