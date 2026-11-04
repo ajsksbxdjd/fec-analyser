@@ -124,6 +124,19 @@ export default function ImageListPanel({ images, currentIndex, onSelect }: Props
                           ⚠ {img.review_count}
                         </span>
                       )}
+                      {img.overlap_count > 0 && (
+                        <span
+                          className="text-[10px] text-violet-600 bg-violet-50 border border-violet-200 px-1.5 py-px rounded font-medium tabular-nums"
+                          title={`Overlaps ${img.overlap_count} other image${img.overlap_count !== 1 ? "s" : ""}`}
+                        >
+                          ⧉ {img.overlap_count}
+                        </span>
+                      )}
+                      {img.duplicate_count > 0 && (
+                        <span className="text-[10px] text-slate-500 bg-slate-100 px-1.5 py-px rounded font-medium tabular-nums">
+                          {img.duplicate_count} dup
+                        </span>
+                      )}
                       {img.is_checked && !img.needs_review && (
                         <span className="text-[10px] text-blue-600 bg-blue-50 px-1.5 py-px rounded font-medium">
                           ✓

@@ -1,5 +1,6 @@
 import type {
   Batch,
+  DedupResult,
   BatchDetail,
   BatchListRow,
   DetectionCreate,
@@ -7,6 +8,8 @@ import type {
   Image,
   ImageDetail,
   ImageListRow,
+  OverlapPartner,
+  OverlapStatus,
   Progress,
   Summary,
 } from "./types";
@@ -125,6 +128,18 @@ export const updateThreshold = (batchId: number, threshold: number) =>
     body: JSON.stringify({ confidence_threshold: threshold }),
   });
 
+/** Re-run overlap detection + cross-image dedup for the batch. */
+// Goes DIRECT to the backend: dedup on ~200 images takes ~40-60 s, longer than
+// the Next.js dev proxy's 30 s timeout (which returns a bare 500).
+export const runDedup = async (batchId: number): Promise<DedupResult> => {
+  const res = await fetch(`${DIRECT_BACKEND}/api/batches/${batchId}/dedup`, { method: "POST" });
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(`${res.status}: ${text}`);
+  }
+  return res.json() as Promise<DedupResult>;
+};
+
 export const downloadReport = async (batchId: number): Promise<Blob> => {
   const res = await fetch(`${BASE}/batches/${batchId}/report.csv`);
   if (!res.ok) throw new Error(`${res.status}: ${res.statusText}`);
@@ -135,6 +150,17 @@ export const downloadReport = async (batchId: number): Promise<Blob> => {
 
 export const getImage = (imageId: number) =>
   apiFetch<ImageDetail>(`/images/${imageId}`);
+
+/** Images overlapping this one, strongest first, with the shared-area outlines. */
+export const getImageOverlaps = (imageId: number) =>
+  apiFetch<OverlapPartner[]>(`/images/${imageId}/overlaps`);
+
+/** Reviewer decision on an overlap; duplicate flags are recomputed at once. */
+export const decideOverlap = (overlapId: number, status: OverlapStatus) =>
+  apiFetch<{ overlap_id: number; status: OverlapStatus; duplicates_found: number }>(
+    `/overlaps/${overlapId}`,
+    { method: "PATCH", body: JSON.stringify({ status }) },
+  );
 
 /** Toggle the human-reviewed flag on an image. Returns the updated ImageOut. */
 export const toggleImageCheck = (imageId: number) =>
@@ -151,6 +177,10 @@ export const addDetection = (imageId: number, payload: DetectionCreate) =>
 /** Confirm a sub-threshold YOLO box — it counts as an egg from now on. */
 export const confirmDetection = (detectionId: number) =>
   apiFetch<Detection>(`/detections/${detectionId}/confirm`, { method: "PATCH" });
+
+/** Override: this box is not a duplicate — count it again. */
+export const markNotDuplicate = (detectionId: number) =>
+  apiFetch<Detection>(`/detections/${detectionId}/not-duplicate`, { method: "PATCH" });
 
 export const deleteDetection = (detectionId: number) =>
   fetch(`${BASE}/detections/${detectionId}`, { method: "DELETE" });

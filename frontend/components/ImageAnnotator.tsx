@@ -12,15 +12,41 @@ interface Props {
   onSelectDetection: (id: number | null) => void;
   onAddDetection: (payload: DetectionCreate) => void;
   onDeleteDetection?: (detectionId: number) => void; // kept for API compat
+  /** Shaded areas this image shares with other images (normalized polygons). */
+  overlapRegions?: OverlapRegion[];
+  /** Boxes to ring in fuchsia (e.g. a duplicate and the box it duplicates). */
+  highlightIds?: number[];
+  hideLegend?: boolean;
+}
+
+export interface OverlapRegion {
+  key: string | number;
+  points: [number, number][];
+  label: string;
+  active?: boolean;          // stronger shading for the region being compared
+}
+
+const COLOR_OVERLAP   = "#8b5cf6"; // violet-500
+const COLOR_HIGHLIGHT = "#d946ef"; // fuchsia-500
+
+/** Polygon centroid clamped inside the image, for placing the region label. */
+function labelPos(points: [number, number][]): { x: number; y: number } {
+  const clamp = (v: number) => Math.min(0.85, Math.max(0.02, v));
+  const inside = points.map(([x, y]) => [Math.min(1, Math.max(0, x)), Math.min(1, Math.max(0, y))]);
+  const x = inside.reduce((a, p) => a + p[0], 0) / inside.length;
+  const y = inside.reduce((a, p) => a + p[1], 0) / inside.length;
+  return { x: clamp(x), y: clamp(y) };
 }
 
 // Box colour by state
 const COLOR_ACCEPTED = "#22c55e"; // green-500
 const COLOR_REVIEW   = "#f59e0b"; // amber-400
 const COLOR_MANUAL   = "#3b82f6"; // blue-500
+const COLOR_DUP      = "#94a3b8"; // slate-400 — counted in an overlapping image
 const MIN_DRAG_PX    = 5;
 
 function boxColor(det: Detection, threshold: number): string {
+  if (det.is_duplicate) return COLOR_DUP;
   if (det.source === "manual") return COLOR_MANUAL;
   if (det.is_confirmed) return COLOR_ACCEPTED;
   if (det.confidence !== null && det.confidence >= threshold) return COLOR_ACCEPTED;
@@ -40,6 +66,9 @@ export default function ImageAnnotator({
   selectedId,
   onSelectDetection,
   onAddDetection,
+  overlapRegions = [],
+  highlightIds = [],
+  hideLegend = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const dragStart    = useRef<{ x: number; y: number } | null>(null);
@@ -139,12 +168,50 @@ export default function ImageAnnotator({
           style={{ display: "block", width: "100%", height: "auto" }}
         />
 
+        {/* ── Overlap shading ── areas also visible in another image */}
+        {overlapRegions.length > 0 && (
+          <div className="absolute inset-0 overflow-hidden" style={{ pointerEvents: "none" }}>
+            <svg
+              className="absolute inset-0 w-full h-full"
+              viewBox="0 0 1 1"
+              preserveAspectRatio="none"
+            >
+              {overlapRegions.map((r) => (
+                <polygon
+                  key={r.key}
+                  points={r.points.map(([x, y]) => `${x},${y}`).join(" ")}
+                  fill={COLOR_OVERLAP}
+                  fillOpacity={r.active ? 0.22 : 0.12}
+                  stroke={COLOR_OVERLAP}
+                  strokeWidth={r.active ? 2.5 : 1.5}
+                  strokeDasharray="6 4"
+                  vectorEffect="non-scaling-stroke"
+                />
+              ))}
+            </svg>
+            {overlapRegions.map((r) => {
+              const pos = labelPos(r.points);
+              return (
+                <span
+                  key={`lbl-${r.key}`}
+                  className="absolute text-[10px] font-semibold text-white px-1.5 py-0.5 rounded whitespace-nowrap"
+                  style={{ left: `${pos.x * 100}%`, top: `${pos.y * 100}%`, background: COLOR_OVERLAP, opacity: 0.9 }}
+                >
+                  {r.label}
+                </span>
+              );
+            })}
+          </div>
+        )}
+
         {/* ── Detection overlays ── positioned in % relative to the image */}
         <div className="absolute inset-0" style={{ pointerEvents: "none" }}>
           {visible.map((det) => {
             const color      = boxColor(det, threshold);
             const isSelected = det.id === selectedId;
             const isReview   = color === COLOR_REVIEW;
+            const isDup      = det.is_duplicate;
+            const isLinked   = highlightIds.includes(det.id);
 
             // YOLO coords are normalised (0-1): convert to CSS %
             const left   = (det.x_center - det.width  / 2) * 100;
@@ -169,9 +236,11 @@ export default function ImageAnnotator({
                   width:      `${width}%`,
                   height:     `${height}%`,
                   boxSizing:  "border-box",
-                  border:     `${isSelected ? 2.5 : 1.5}px solid ${color}`,
-                  // White glow ring behind the selected box
-                  boxShadow:  isSelected ? `0 0 0 2px white` : "none",
+                  border:     isLinked
+                    ? `3px solid ${COLOR_HIGHLIGHT}`
+                    : `${isSelected ? 2.5 : 1.5}px ${isDup ? "dashed" : "solid"} ${color}`,
+                  // White glow ring behind the selected / linked box
+                  boxShadow:  isSelected || isLinked ? `0 0 0 2px white` : "none",
                   cursor:     addMode ? "crosshair" : "pointer",
                   // Let clicks through in add-mode; capture in select-mode
                   pointerEvents: addMode ? "none" : "auto",
@@ -195,6 +264,27 @@ export default function ImageAnnotator({
                     }}
                   >
                     {label}
+                  </span>
+                )}
+
+                {/* "DUP" tag on duplicate boxes (bottom-right) */}
+                {isDup && !isSelected && (
+                  <span
+                    style={{
+                      position:     "absolute",
+                      bottom:       2,
+                      right:        2,
+                      background:   COLOR_DUP,
+                      color:        "#fff",
+                      fontSize:     "8px",
+                      fontWeight:   "bold",
+                      lineHeight:   1,
+                      padding:      "2px 3px",
+                      borderRadius: 2,
+                      display:      "block",
+                    }}
+                  >
+                    DUP
                   </span>
                 )}
 
@@ -240,7 +330,7 @@ export default function ImageAnnotator({
         )}
 
         {/* ── Legend (bottom-left of the image) */}
-        <div
+        {!hideLegend && <div
           className="absolute bottom-3 left-3 flex items-center gap-3 bg-black/50 text-white text-xs px-2.5 py-1.5 rounded-lg backdrop-blur-sm"
           style={{ pointerEvents: "none" }}
         >
@@ -256,12 +346,22 @@ export default function ImageAnnotator({
             <span className="inline-block w-3 h-3 rounded-sm" style={{ background: COLOR_MANUAL }} />
             Manual
           </span>
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block w-3 h-3 rounded-sm" style={{ background: COLOR_DUP }} />
+            Duplicate
+          </span>
+          {overlapRegions.length > 0 && (
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block w-3 h-3 rounded-sm border border-dashed" style={{ background: `${COLOR_OVERLAP}55`, borderColor: COLOR_OVERLAP }} />
+              Overlap
+            </span>
+          )}
           {addMode ? (
             <span className="text-indigo-300 font-semibold">Draw to add</span>
           ) : (
             <span className="text-gray-300">Click box to select</span>
           )}
-        </div>
+        </div>}
       </div>
     </div>
   );

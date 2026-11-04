@@ -15,6 +15,9 @@ import {
   renameBatch,
   getBatchStatus,
   downloadReport,
+  runDedup,
+  markNotDuplicate,
+  getImageOverlaps,
 } from "@/lib/api";
 import type {
   ImageListRow,
@@ -22,11 +25,13 @@ import type {
   Detection,
   DetectionCreate,
   Summary,
+  OverlapPartner,
 } from "@/lib/types";
 import ImageAnnotator from "@/components/ImageAnnotator";
+import OverlapCompare from "@/components/OverlapCompare";
 import ImageListPanel from "@/components/ChecklistPanel";
 import InlineEdit from "@/components/InlineEdit";
-import { Hash, Calculator, CheckCircle2, TrendingUp, Download, Plus } from "lucide-react";
+import { Hash, Calculator, CheckCircle2, TrendingUp, Download, Plus, Layers } from "lucide-react";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 function fmtDuration(secs: number): string {
@@ -76,6 +81,11 @@ export default function DashboardPage() {
   const [clientElapsed, setClientElapsed] = useState(0);
   const [inferCompleted, setInferCompleted] = useState<{ elapsed: number; total: number } | null>(null);
   const [error, setError] = useState("");
+  const [dedupRunning, setDedupRunning] = useState(false);
+  const [dedupMessage, setDedupMessage] = useState("");
+  const [overlaps, setOverlaps] = useState<OverlapPartner[]>([]);
+  const [showOverlaps, setShowOverlaps] = useState(true);
+  const [compare, setCompare] = useState<{ partner: OverlapPartner; focus: number | null } | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const clientTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const clientElapsedRef = useRef(0);
@@ -149,6 +159,7 @@ export default function DashboardPage() {
     if (!row) return;
     setSelectedId(null);
     getImage(row.id).then(setImageDetail).catch(console.error);
+    getImageOverlaps(row.id).then(setOverlaps).catch(() => setOverlaps([]));
   }, [currentIndex, imageList]);
 
   // ── detection handlers ────────────────────────────────────────────────────
@@ -195,6 +206,89 @@ export default function DashboardPage() {
       const newIdx = imgs.findIndex((r) => r.id === currentId);
       if (newIdx !== -1) setCurrentIndex(newIdx);
     }
+  };
+
+  // ── refresh list + summary + current image, keeping the same image selected ─
+  const refreshKeepingImage = async () => {
+    const currentId = imageList[currentIndex]?.id;
+    const [imgs, s] = await Promise.all([listImages(batchId), getBatchSummary(batchId)]);
+    setImageList(imgs);
+    setSummary(s);
+    const newIdx = currentId ? imgs.findIndex((r) => r.id === currentId) : -1;
+    if (newIdx !== -1) setCurrentIndex(newIdx);
+    if (currentId) {
+      const [detail, ovs] = await Promise.all([
+        getImage(currentId),
+        getImageOverlaps(currentId).catch(() => [] as OverlapPartner[]),
+      ]);
+      setImageDetail(detail);
+      setOverlaps(ovs);
+      // keep an open compare panel in sync with the new status / counts
+      setCompare((prev) => {
+        if (!prev) return prev;
+        const fresh = ovs.find((o) => o.overlap_id === prev.partner.overlap_id);
+        return fresh ? { ...prev, partner: fresh } : prev;
+      });
+    }
+  };
+
+  // ── overlap compare ───────────────────────────────────────────────────────
+  const openCompareForDuplicate = (det: Detection) => {
+    if (det.duplicate_of_image_id == null) return;
+    const partner =
+      overlaps.find((o) => o.image_id === det.duplicate_of_image_id) ??
+      // Linked through a third image of the same overlap group: no direct outline
+      {
+        overlap_id: 0,
+        image_id: det.duplicate_of_image_id,
+        filename: det.duplicate_of_filename ?? `image ${det.duplicate_of_image_id}`,
+        inliers: 0,
+        strength: "weak" as const,
+        status: "auto" as const,
+        region_here: [],
+        region_there: [],
+        matches: [],
+      };
+    setCompare({ partner, focus: det.id });
+  };
+
+  const openImageById = (imageId: number) => {
+    const idx = imageList.findIndex((r) => r.id === imageId);
+    if (idx !== -1) {
+      setCompare(null);
+      setCurrentIndex(idx);
+      setSelectedId(null);
+      setAddMode(false);
+    }
+  };
+
+  // ── cross-image dedup ─────────────────────────────────────────────────────
+  const handleRunDedup = async () => {
+    setDedupRunning(true);
+    setDedupMessage("");
+    try {
+      const r = await runDedup(batchId);
+      setDedupMessage(
+        `${r.overlap_pairs} overlapping pair${r.overlap_pairs !== 1 ? "s" : ""} · ` +
+        `${r.duplicates_found} duplicate${r.duplicates_found !== 1 ? "s" : ""} excluded · ` +
+        `${r.elapsed_seconds.toFixed(1)}s`
+      );
+      setSelectedId(null);
+      await refreshKeepingImage();
+    } catch (e) {
+      setDedupMessage(`Dedup failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDedupRunning(false);
+    }
+  };
+
+  const handleNotDuplicate = async (detId: number) => {
+    const det = await markNotDuplicate(detId);
+    setSelectedId(null);
+    setImageDetail((prev) =>
+      prev ? { ...prev, detections: prev.detections.map((d) => d.id === detId ? { ...d, ...det } : d) } : prev
+    );
+    await refreshKeepingImage();
   };
 
   // ── mark image as reviewed / unreviewed ──────────────────────────────────
@@ -252,7 +346,7 @@ export default function DashboardPage() {
   const threshold = summary ? summary.threshold : 0.70;
 
   const isNeedsReview = (d: Detection) =>
-    d.source === "yolo" && !d.is_confirmed && d.confidence !== null && d.confidence < threshold;
+    !d.is_duplicate && d.source === "yolo" && !d.is_confirmed && d.confidence !== null && d.confidence < threshold;
 
   // ── loading / error states ────────────────────────────────────────────────
   if (loading) {
@@ -369,6 +463,17 @@ export default function DashboardPage() {
           </button>
         </div>
 
+        {/* Re-run cross-image dedup */}
+        <button
+          onClick={handleRunDedup}
+          disabled={dedupRunning}
+          title="Find overlapping images and exclude eggs counted twice"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-slate-100 text-slate-700 rounded-lg hover:bg-slate-200 disabled:opacity-50 transition-colors flex-shrink-0"
+        >
+          <Layers size={13} strokeWidth={2} />
+          {dedupRunning ? "Deduplicating…" : "Dedup overlaps"}
+        </button>
+
         {/* Download CSV */}
         <button
           onClick={handleDownload}
@@ -427,6 +532,13 @@ export default function DashboardPage() {
                     · ⚠ {totalReview} box{totalReview !== 1 ? "es" : ""} need review
                   </span>
                 )}
+              </p>
+              <p className={`text-xs mt-1 opacity-70 ${ic.text} tabular-nums`}>
+                {dedupMessage
+                  ? `Dedup: ${dedupMessage}`
+                  : summary.overlap_pairs === null
+                  ? "Overlap dedup has not run for this batch yet"
+                  : `${summary.duplicate_count} duplicate box${summary.duplicate_count !== 1 ? "es" : ""} excluded across ${summary.overlap_pairs} overlapping image pair${summary.overlap_pairs !== 1 ? "s" : ""}`}
               </p>
             </div>
 
@@ -504,6 +616,11 @@ export default function DashboardPage() {
                   ⚠ {currentRow.review_count}
                 </span>
               )}
+              {(currentRow?.duplicate_count ?? 0) > 0 && (
+                <span className="text-[10px] font-medium bg-slate-100 text-slate-500 border border-slate-200 px-2 py-0.5 rounded-full flex-shrink-0 tabular-nums">
+                  {currentRow!.duplicate_count} dup
+                </span>
+              )}
             </div>
 
             <div className="flex items-center gap-2 flex-shrink-0">
@@ -549,6 +666,43 @@ export default function DashboardPage() {
             </div>
           </div>
 
+          {/* Overlap strip — which other images share area with this one */}
+          {overlaps.length > 0 && (
+            <div className="flex items-center gap-2 px-4 py-2 bg-violet-50 border-b border-violet-200 text-xs flex-wrap">
+              <span className="font-semibold text-violet-700">⧉ Overlaps with</span>
+              {overlaps.map((o) => (
+                <button
+                  key={o.image_id}
+                  onClick={() => setCompare({ partner: o, focus: null })}
+                  title={o.status === "rejected" ? "Marked as different area" : "Compare side by side"}
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border font-medium max-w-[260px] ${
+                    o.status === "rejected"
+                      ? "bg-slate-50 border-slate-300 text-slate-400 line-through hover:bg-slate-100"
+                      : o.strength === "weak" && o.status === "auto"
+                      ? "bg-amber-50 border-amber-300 text-amber-700 hover:bg-amber-100"
+                      : "bg-white border-violet-300 text-violet-700 hover:bg-violet-100"
+                  }`}
+                >
+                  <span className="truncate">{o.filename}</span>
+                  {o.status === "confirmed" && <span className="text-green-600 no-underline">✓</span>}
+                  {o.status === "auto" && o.strength === "weak" && <span>⚠</span>}
+                </button>
+              ))}
+              {overlaps.some((o) => o.status === "auto" && o.strength === "weak") && (
+                <span className="text-amber-700">⚠ weak match</span>
+              )}
+              <label className="ml-auto flex items-center gap-1.5 text-violet-700 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={showOverlaps}
+                  onChange={(e) => setShowOverlaps(e.target.checked)}
+                  className="accent-violet-600"
+                />
+                Shade shared areas
+              </label>
+            </div>
+          )}
+
           {/* Image area — no height/overflow constraint; page is what scrolls */}
           <div className="bg-gray-50">
             {imageDetail ? (
@@ -561,6 +715,13 @@ export default function DashboardPage() {
                 onSelectDetection={setSelectedId}
                 onAddDetection={handleAdd}
                 onDeleteDetection={handleDelete}
+                overlapRegions={
+                  showOverlaps
+                    ? overlaps
+                        .filter((o) => o.status !== "rejected")
+                        .map((o) => ({ key: o.image_id, points: o.region_here, label: `also in ${o.filename}` }))
+                    : []
+                }
               />
             ) : (
               <div className="flex items-center justify-center min-h-48">
@@ -574,7 +735,9 @@ export default function DashboardPage() {
             <div className="sticky bottom-0 z-10 flex items-center justify-between px-4 py-3 bg-white border-t border-gray-200">
               <div className="flex items-center gap-3">
                 <div className={`w-3 h-3 rounded-sm flex-shrink-0 ${
-                  isNeedsReview(selectedDet)
+                  selectedDet.is_duplicate
+                    ? "bg-slate-400"
+                    : isNeedsReview(selectedDet)
                     ? "bg-amber-400"
                     : selectedDet.source === "manual"
                     ? "bg-blue-500"
@@ -589,9 +752,30 @@ export default function DashboardPage() {
                     {isNeedsReview(selectedDet) && " · below threshold — needs review"}
                     {selectedDet.is_confirmed && " · confirmed"}
                   </p>
+                  {selectedDet.is_duplicate && (
+                    <p className="text-xs text-slate-500">
+                      Duplicate — already counted in {selectedDet.duplicate_of_filename ?? "an overlapping image"} · not counted here
+                    </p>
+                  )}
                 </div>
               </div>
               <div className="flex items-center gap-2">
+                {selectedDet.is_duplicate && selectedDet.duplicate_of_image_id != null && (
+                  <button
+                    onClick={() => openCompareForDuplicate(selectedDet)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 transition-colors"
+                  >
+                    ⧉ Compare
+                  </button>
+                )}
+                {selectedDet.is_duplicate && (
+                  <button
+                    onClick={() => handleNotDuplicate(selectedDet.id)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700 text-white text-xs font-semibold rounded-lg hover:bg-slate-800 transition-colors"
+                  >
+                    Not a duplicate
+                  </button>
+                )}
                 {isNeedsReview(selectedDet) && (
                   <button
                     onClick={() => handleConfirm(selectedDet.id)}
@@ -620,6 +804,20 @@ export default function DashboardPage() {
           )}
         </div>
       </div>
+
+      {/* Side-by-side overlap compare */}
+      {compare && imageDetail && (
+        <OverlapCompare
+          batchId={batchId}
+          current={imageDetail}
+          partner={compare.partner}
+          threshold={threshold}
+          focusDetectionId={compare.focus}
+          onClose={() => setCompare(null)}
+          onOpenPartner={openImageById}
+          onDecided={refreshKeepingImage}
+        />
+      )}
     </div>
   );
 }

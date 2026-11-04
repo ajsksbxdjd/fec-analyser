@@ -56,6 +56,23 @@ def confirm_detection(detection_id: int, db: Session = Depends(get_db)):
     return det
 
 
+@router.patch("/detections/{detection_id}/not-duplicate", response_model=DetectionOut)
+def mark_not_duplicate(detection_id: int, db: Session = Depends(get_db)):
+    """
+    Researcher override: this box is NOT a duplicate of a box in another image.
+    It counts again, and future dedup runs will never flag it.
+    """
+    det = db.query(Detection).filter(Detection.id == detection_id).first()
+    if not det:
+        raise HTTPException(status_code=404, detail="Detection not found")
+    det.is_duplicate = False
+    det.duplicate_of_id = None
+    det.keep_override = True
+    db.commit()
+    db.refresh(det)
+    return det
+
+
 @router.delete("/detections/{detection_id}", status_code=204)
 def delete_detection(detection_id: int, db: Session = Depends(get_db)):
     """Soft-delete a detection (false positive or rejected sub-threshold box)."""

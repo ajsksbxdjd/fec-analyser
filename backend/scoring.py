@@ -12,12 +12,15 @@ def is_accepted(det, threshold: float) -> bool:
     """
     True when this non-deleted detection counts as an egg.
 
+    Cross-image duplicates (is_duplicate) never count — the same egg is
+    already counted in an overlapping image.
+
     Accepted when:
       - manually drawn (source == "manual")      → always, confidence 1.0
       - researcher confirmed it (is_confirmed)   → always, regardless of conf
       - YOLO box with conf >= threshold          → auto-accepted
     """
-    if det.is_deleted:
+    if det.is_deleted or getattr(det, "is_duplicate", False):
         return False
     if det.source == "manual" or det.is_confirmed:
         return True
@@ -31,10 +34,16 @@ def needs_review(det, threshold: float) -> bool:
     """
     return (
         not det.is_deleted
+        and not getattr(det, "is_duplicate", False)
         and det.source == "yolo"
         and not det.is_confirmed
         and (det.confidence is None or det.confidence < threshold)
     )
+
+
+def is_duplicate(det) -> bool:
+    """True when this non-deleted box was flagged as a cross-image duplicate."""
+    return not det.is_deleted and bool(getattr(det, "is_duplicate", False))
 
 
 def severity(epg: int) -> str:

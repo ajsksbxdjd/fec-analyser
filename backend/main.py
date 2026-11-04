@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from database import Base, engine, run_migrations
-from routers import batches, detections, images, inference, reports
+from routers import batches, detections, images, inference, overlaps, reports
 
 STORAGE_ROOT = Path(__file__).parent / "storage"
 UPLOADS_DIR = STORAGE_ROOT / "uploads"
@@ -53,6 +53,7 @@ app.include_router(images.router)
 app.include_router(detections.router)
 app.include_router(inference.router)
 app.include_router(reports.router)
+app.include_router(overlaps.router)
 
 
 @app.get("/health")

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from models import Batch, Detection, Image
-from scoring import is_accepted, needs_review, severity, threshold_of
+from scoring import is_accepted, is_duplicate, needs_review, severity, threshold_of
 
 router = APIRouter(prefix="/api/batches", tags=["reports"])
 
@@ -34,9 +34,10 @@ def download_report(batch_id: int, db: Session = Depends(get_db)):
     writer.writerow(["Generated", datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")])
     writer.writerow(["Confidence Threshold", f"{round(threshold * 100)}%"])
     writer.writerow([])
-    writer.writerow(["Image ID", "Filename", "Egg Count", "Needs Review"])
+    writer.writerow(["Image ID", "Filename", "Egg Count", "Needs Review", "Duplicates Excluded"])
 
     total_eggs = 0
+    total_dups = 0
     for img in images:
         dets = (
             db.query(Detection)
@@ -45,8 +46,10 @@ def download_report(batch_id: int, db: Session = Depends(get_db)):
         )
         count = sum(1 for d in dets if is_accepted(d, threshold))
         review = sum(1 for d in dets if needs_review(d, threshold))
+        dups = sum(1 for d in dets if is_duplicate(d))
         total_eggs += count
-        writer.writerow([img.id, img.filename, count, review if review else ""])
+        total_dups += dups
+        writer.writerow([img.id, img.filename, count, review if review else "", dups if dups else ""])
 
     epg = total_eggs * 24
     intensity = severity(epg)
@@ -58,6 +61,7 @@ def download_report(batch_id: int, db: Session = Depends(get_db)):
 
     writer.writerow([])
     writer.writerow(["Total Eggs", total_eggs])
+    writer.writerow(["Duplicates Excluded (overlapping images)", total_dups])
     writer.writerow(["EPG (x24)", epg])
     writer.writerow(["Infection Intensity", intensity_labels[intensity]])
 

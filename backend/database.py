@@ -37,6 +37,13 @@ def run_migrations():
         ("detections", "is_confirmed",      "ALTER TABLE detections ADD COLUMN is_confirmed BOOLEAN DEFAULT 0"),
         ("batches",    "confidence_threshold", "ALTER TABLE batches ADD COLUMN confidence_threshold FLOAT DEFAULT 0.7"),
         ("batches",    "elapsed_seconds",    "ALTER TABLE batches ADD COLUMN elapsed_seconds FLOAT"),
+        ("batches",    "overlap_pairs",      "ALTER TABLE batches ADD COLUMN overlap_pairs INTEGER"),
+        ("batches",    "duplicates_found",   "ALTER TABLE batches ADD COLUMN duplicates_found INTEGER"),
+        ("detections", "is_duplicate",       "ALTER TABLE detections ADD COLUMN is_duplicate BOOLEAN DEFAULT 0"),
+        ("detections", "duplicate_of_id",    "ALTER TABLE detections ADD COLUMN duplicate_of_id INTEGER"),
+        ("detections", "keep_override",      "ALTER TABLE detections ADD COLUMN keep_override BOOLEAN DEFAULT 0"),
+        ("image_overlaps", "match_points",   "ALTER TABLE image_overlaps ADD COLUMN match_points TEXT"),
+        ("image_overlaps", "status",         "ALTER TABLE image_overlaps ADD COLUMN status VARCHAR DEFAULT 'auto'"),
     ]
     with engine.begin() as conn:
         for table, column, ddl in migrations:

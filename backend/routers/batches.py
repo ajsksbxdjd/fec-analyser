@@ -7,9 +7,10 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import Batch, Detection, Image
+from models import Batch, Detection, Image, ImageOverlap
 from scoring import (
     is_accepted as _is_accepted,
+    is_duplicate as _is_duplicate,
     needs_review as _needs_review,
     severity as _severity,
     threshold_of as _threshold_of_val,
@@ -20,6 +21,7 @@ from schemas import (
     BatchListRow,
     BatchOut,
     BatchRename,
+    DedupOut,
     ImageListRow,
     SummaryImageRow,
     SummaryOut,
@@ -92,6 +94,7 @@ def _build_summary(batch: Batch, db: Session) -> SummaryOut:
 
     rows: list[SummaryImageRow] = []
     total_eggs = 0
+    total_dups = 0
     positive_count = 0
 
     for img in images:
@@ -99,7 +102,9 @@ def _build_summary(batch: Batch, db: Session) -> SummaryOut:
         accepted = [d for d in idets if _is_accepted(d, threshold)]
         egg_count = len(accepted)
         review_count = sum(1 for d in idets if _needs_review(d, threshold))
+        dup_count = sum(1 for d in idets if _is_duplicate(d))
         total_eggs += egg_count
+        total_dups += dup_count
         if egg_count > 0:
             positive_count += 1
         rows.append(SummaryImageRow(
@@ -108,17 +113,19 @@ def _build_summary(batch: Batch, db: Session) -> SummaryOut:
             egg_count=egg_count,
             review_count=review_count,
             needs_review=review_count > 0,
+            duplicate_count=dup_count,
         ))
 
     # needs-review first (by review_count desc), then by egg_count desc
     rows.sort(key=lambda r: (r.needs_review, r.review_count, r.egg_count), reverse=True)
 
-    # Average confidence: all non-deleted YOLO detections (by_image already excludes deleted)
+    # Average confidence: all non-deleted, non-duplicate YOLO detections
+    # (by_image already excludes deleted)
     yolo_confs = [
         d.confidence
         for dets in by_image.values()
         for d in dets
-        if d.source == "yolo" and d.confidence is not None
+        if d.source == "yolo" and d.confidence is not None and not _is_duplicate(d)
     ]
     avg_conf = round(sum(yolo_confs) / len(yolo_confs), 4) if yolo_confs else None
 
@@ -134,6 +141,8 @@ def _build_summary(batch: Batch, db: Session) -> SummaryOut:
         avg_confidence=avg_conf,
         severity=_severity(epg),
         threshold=threshold,
+        duplicate_count=total_dups,
+        overlap_pairs=batch.overlap_pairs,
         images=rows,
     )
 
@@ -259,12 +268,21 @@ def list_images(batch_id: int, db: Session = Depends(get_db)):
     threshold = _threshold_of(batch)
     images = db.query(Image).filter(Image.batch_id == batch_id).all()
     by_image = _detections_by_image(batch_id, db)
+    overlap_counts: dict[int, int] = {}
+    for a_id, b_id in (
+        db.query(ImageOverlap.image_a_id, ImageOverlap.image_b_id)
+        .filter(ImageOverlap.batch_id == batch_id, ImageOverlap.status != "rejected")
+        .all()
+    ):
+        overlap_counts[a_id] = overlap_counts.get(a_id, 0) + 1
+        overlap_counts[b_id] = overlap_counts.get(b_id, 0) + 1
 
     rows: list[ImageListRow] = []
     for img in images:
         idets = by_image.get(img.id, [])
         egg_count = sum(1 for d in idets if _is_accepted(d, threshold))
         review_count = sum(1 for d in idets if _needs_review(d, threshold))
+        dup_count = sum(1 for d in idets if _is_duplicate(d))
         rows.append(ImageListRow(
             id=img.id,
             batch_id=img.batch_id,
@@ -274,6 +292,8 @@ def list_images(batch_id: int, db: Session = Depends(get_db)):
             review_count=review_count,
             needs_review=review_count > 0,
             is_checked=img.is_checked,
+            duplicate_count=dup_count,
+            overlap_count=overlap_counts.get(img.id, 0),
         ))
 
     # Three-section sort:
@@ -303,3 +323,24 @@ def update_threshold(batch_id: int, payload: ThresholdUpdate, db: Session = Depe
 def get_summary(batch_id: int, db: Session = Depends(get_db)):
     batch = _get_batch_or_404(batch_id, db)
     return _build_summary(batch, db)
+
+
+@router.post("/{batch_id}/dedup", response_model=DedupOut)
+def run_dedup(batch_id: int, db: Session = Depends(get_db)):
+    """
+    (Re)run overlap detection + cross-image dedup for a batch.
+
+    Runs automatically after inference; call this again after adding / removing
+    boxes or after marking a box "not a duplicate".
+    """
+    batch = _get_batch_or_404(batch_id, db)
+    if batch.status == "processing":
+        raise HTTPException(status_code=400, detail="Inference still running")
+    from dedup import DedupAlreadyRunning, run_dedup_for_batch
+    try:
+        return DedupOut(**run_dedup_for_batch(db, batch_id))
+    except DedupAlreadyRunning as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Dedup failed: {e}") from e
