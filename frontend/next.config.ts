@@ -9,6 +9,10 @@ const nextConfig: NextConfig = {
     serverActions: {
       bodySizeLimit: "500mb",
     },
+    // The dev proxy (rewrites below) cuts request bodies at 10 MB and gives up
+    // after 30 s by default. Through a tunnel every upload goes via this proxy.
+    middlewareClientMaxBodySize: "100mb",
+    proxyTimeout: 300_000,
   },
   async rewrites() {
     return [

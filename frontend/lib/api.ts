@@ -17,17 +17,34 @@ import type {
 // JSON API calls go through the Next.js rewrite proxy (/api/* → :8000/api/*)
 const BASE = "/api";
 
-// File uploads go DIRECTLY to the FastAPI backend to bypass the Next.js
-// 10 MB body-size limit on the dev proxy. XHR also gives us upload progress.
+// File uploads go DIRECTLY to the FastAPI backend when the app is opened on
+// this machine or the local network (localhost / LAN IP): fastest, one request.
 //
-// Use window.location.hostname so this works whether the app is accessed via
-// localhost OR a LAN IP like 192.168.100.42 — the backend is always on the
-// same machine as the frontend, just on port 8000.
+// Through a tunnel (e.g. https://xyz.trycloudflare.com) port 8000 is not
+// reachable, so uploads go through the same address as the page (the Next.js
+// proxy) instead, split into chunks that fit the proxy / tunnel size limits.
+function isLocalNetwork(): boolean {
+  if (typeof window === "undefined") return true;
+  const h = window.location.hostname;
+  return (
+    window.location.protocol === "http:" &&
+    (h === "localhost" ||
+      h === "127.0.0.1" ||
+      /^10\./.test(h) ||
+      /^192\.168\./.test(h) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(h))
+  );
+}
+
 const DIRECT_BACKEND =
   process.env.NEXT_PUBLIC_API_URL ||
   (typeof window !== "undefined"
     ? `http://${window.location.hostname}:8000`
     : "http://localhost:8000");
+
+// Per-request upload size through a tunnel (Cloudflare caps requests at 100 MB)
+const TUNNEL_CHUNK_BYTES = 40 * 1024 * 1024;
+const TUNNEL_MAX_FILE_BYTES = 95 * 1024 * 1024;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -66,29 +83,21 @@ export const renameBatch = (id: number, name: string) =>
     body: JSON.stringify({ name }),
   });
 
-/**
- * Upload files directly to the FastAPI backend using XHR so we get:
- *  - No Next.js body-size limit (10 MB cap bypassed entirely)
- *  - Real upload progress events via xhr.upload.onprogress
- */
-export function uploadImagesWithProgress(
-  batchId: number,
+/** POST one group of files with XHR so we get upload progress events. */
+function postFiles(
+  url: string,
   files: File[],
-  onProgress: (pct: number) => void,
+  onLoaded: (loaded: number) => void,
 ): Promise<Batch> {
   return new Promise((resolve, reject) => {
     const form = new FormData();
     files.forEach((f) => form.append("files", f));
 
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", `${DIRECT_BACKEND}/api/batches/${batchId}/upload`);
-
+    xhr.open("POST", url);
     xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        onProgress(Math.round((e.loaded / e.total) * 100));
-      }
+      if (e.lengthComputable) onLoaded(e.loaded);
     };
-
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
@@ -100,12 +109,67 @@ export function uploadImagesWithProgress(
         reject(new Error(`${xhr.status}: ${xhr.responseText || xhr.statusText}`));
       }
     };
-
-    xhr.onerror = () => reject(new Error("Upload failed — check backend is running on port 8000"));
+    xhr.onerror = () => reject(new Error("Upload failed — check the backend is running"));
     xhr.ontimeout = () => reject(new Error("Upload timed out"));
     xhr.timeout = 0; // No timeout so large ZIPs can complete
     xhr.send(form);
   });
+}
+
+/**
+ * Upload images / ZIPs for a batch, reporting overall progress (0-100).
+ *
+ *  - On this machine / the LAN: one request straight to FastAPI on :8000
+ *    (no Next.js body-size limit at all).
+ *  - Through a tunnel: several requests through the page's own address, each
+ *    under TUNNEL_CHUNK_BYTES; the backend appends them to the same batch.
+ */
+export async function uploadImagesWithProgress(
+  batchId: number,
+  files: File[],
+  onProgress: (pct: number) => void,
+): Promise<Batch> {
+  if (isLocalNetwork()) {
+    return postFiles(`${DIRECT_BACKEND}/api/batches/${batchId}/upload`, files, (loaded) => {
+      const total = files.reduce((a, f) => a + f.size, 0) || 1;
+      onProgress(Math.min(100, Math.round((loaded / total) * 100)));
+    });
+  }
+
+  const tooBig = files.find((f) => f.size > TUNNEL_MAX_FILE_BYTES);
+  if (tooBig) {
+    throw new Error(
+      `${tooBig.name} is larger than 95 MB, which can't go through the shared link. ` +
+      "Split the ZIP into smaller ZIPs, or upload the images directly.",
+    );
+  }
+
+  const chunks: File[][] = [];
+  let cur: File[] = [];
+  let curBytes = 0;
+  for (const f of files) {
+    if (cur.length && curBytes + f.size > TUNNEL_CHUNK_BYTES) {
+      chunks.push(cur);
+      cur = [];
+      curBytes = 0;
+    }
+    cur.push(f);
+    curBytes += f.size;
+  }
+  if (cur.length) chunks.push(cur);
+
+  const total = files.reduce((a, f) => a + f.size, 0) || 1;
+  let done = 0;
+  let last: Batch | null = null;
+  for (const chunk of chunks) {
+    const chunkBytes = chunk.reduce((a, f) => a + f.size, 0);
+    last = await postFiles(`${BASE}/batches/${batchId}/upload`, chunk, (loaded) => {
+      onProgress(Math.min(100, Math.round(((done + Math.min(loaded, chunkBytes)) / total) * 100)));
+    });
+    done += chunkBytes;
+  }
+  onProgress(100);
+  return last!;
 }
 
 export const runInference = (batchId: number) =>
@@ -129,15 +193,47 @@ export const updateThreshold = (batchId: number, threshold: number) =>
   });
 
 /** Re-run overlap detection + cross-image dedup for the batch. */
-// Goes DIRECT to the backend: dedup on ~200 images takes ~40-60 s, longer than
-// the Next.js dev proxy's 30 s timeout (which returns a bare 500).
-export const runDedup = async (batchId: number): Promise<DedupResult> => {
-  const res = await fetch(`${DIRECT_BACKEND}/api/batches/${batchId}/dedup`, { method: "POST" });
-  if (!res.ok) {
+interface DedupJob {
+  state: "idle" | "running" | "done" | "error";
+  result: DedupResult | null;
+  error: string | null;
+}
+
+/** State of the batch's background dedup job (idle | running | done | error). */
+export const getDedupStatus = (batchId: number) =>
+  apiFetch<DedupJob>(`/batches/${batchId}/dedup`);
+
+/** Poll until the batch's running dedup job finishes. */
+export const waitForDedup = async (
+  batchId: number,
+  isCancelled: () => boolean = () => false,
+): Promise<DedupResult | null> => {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 2000));
+    if (isCancelled()) return null;
+    const job = await getDedupStatus(batchId);
+    if (job.state === "done" && job.result) return job.result;
+    if (job.state === "error") throw new Error(job.error ?? "Dedup failed");
+    if (job.state === "idle") throw new Error("Dedup job was lost (backend restarted?)");
+  }
+};
+
+/**
+ * Re-run overlap detection + dedup. The backend runs it as a background job
+ * (it takes ~1-2 min on 200 images, longer than proxies / tunnels allow a
+ * request to stay open), so this starts it and polls until it finishes.
+ * If one is already running (e.g. the automatic one after YOLO), it waits for that.
+ */
+export const runDedup = async (
+  batchId: number,
+  isCancelled: () => boolean = () => false,
+): Promise<DedupResult | null> => {
+  const res = await fetch(`${BASE}/batches/${batchId}/dedup`, { method: "POST" });
+  if (!res.ok && res.status !== 409) {
     const text = await res.text().catch(() => res.statusText);
     throw new Error(`${res.status}: ${text}`);
   }
-  return res.json() as Promise<DedupResult>;
+  return waitForDedup(batchId, isCancelled);
 };
 
 export const downloadReport = async (batchId: number): Promise<Blob> => {

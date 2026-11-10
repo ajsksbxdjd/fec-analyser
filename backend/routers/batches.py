@@ -21,7 +21,7 @@ from schemas import (
     BatchListRow,
     BatchOut,
     BatchRename,
-    DedupOut,
+    DedupJobOut,
     ImageListRow,
     SummaryImageRow,
     SummaryOut,
@@ -33,7 +33,7 @@ router = APIRouter(prefix="/api/batches", tags=["batches"])
 STORAGE_ROOT = Path(__file__).parent.parent / "storage"
 ALLOWED_EXTS = {".jpg", ".jpeg", ".png"}
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB per image
-MAX_IMAGES = 200
+MAX_IMAGES = 500  # per batch; keep in sync with MAX_IMAGES in frontend/components/BatchUpload.tsx
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -225,6 +225,12 @@ async def upload_images(
     batch = _get_batch_or_404(batch_id, db)
     if batch.status not in ("pending",):
         raise HTTPException(status_code=400, detail="Batch already has uploads")
+    # Uploads may arrive in several requests (the browser splits large uploads
+    # into chunks when the app is reached through a tunnel / proxy).
+    existing = db.query(Image).filter(Image.batch_id == batch_id).count()
+    room = MAX_IMAGES - existing
+    if room <= 0:
+        raise HTTPException(status_code=400, detail=f"Batch already has the maximum of {MAX_IMAGES} images")
 
     dest_dir = _upload_dir(batch_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -248,14 +254,23 @@ async def upload_images(
     if not saved_paths:
         raise HTTPException(status_code=400, detail="No valid image files found")
 
-    # Cap at MAX_IMAGES
-    saved_paths = saved_paths[:MAX_IMAGES]
+    # Max MAX_IMAGES for the whole batch (across chunked requests). Refuse
+    # instead of silently dropping the extra images, so the count is never
+    # quietly wrong.
+    if len(saved_paths) > room:
+        for path in saved_paths:
+            path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many images: a batch can have at most {MAX_IMAGES} "
+                   f"(this upload has {existing + len(saved_paths)}). Split it into smaller batches.",
+        )
 
     for path in saved_paths:
         rel = f"uploads/{batch_id}/{path.name}"
         db.add(Image(batch_id=batch_id, filename=path.name, filepath=rel))
 
-    batch.image_count = len(saved_paths)
+    batch.image_count = existing + len(saved_paths)
     batch.status = "pending"
     db.commit()
     db.refresh(batch)
@@ -325,22 +340,29 @@ def get_summary(batch_id: int, db: Session = Depends(get_db)):
     return _build_summary(batch, db)
 
 
-@router.post("/{batch_id}/dedup", response_model=DedupOut)
+@router.post("/{batch_id}/dedup", response_model=DedupJobOut, status_code=202)
 def run_dedup(batch_id: int, db: Session = Depends(get_db)):
     """
-    (Re)run overlap detection + cross-image dedup for a batch.
+    Start (re)running overlap detection + cross-image dedup for a batch in the
+    background; poll GET /{batch_id}/dedup for the result.
 
-    Runs automatically after inference; call this again after adding / removing
+    Runs automatically after inference; run it again after adding / removing
     boxes or after marking a box "not a duplicate".
     """
     batch = _get_batch_or_404(batch_id, db)
     if batch.status == "processing":
         raise HTTPException(status_code=400, detail="Inference still running")
-    from dedup import DedupAlreadyRunning, run_dedup_for_batch
+    from dedup import DedupAlreadyRunning, dedup_job_status, start_dedup_job
     try:
-        return DedupOut(**run_dedup_for_batch(db, batch_id))
+        start_dedup_job(batch_id)
     except DedupAlreadyRunning as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Dedup failed: {e}") from e
+    return DedupJobOut(**dedup_job_status(batch_id))
+
+
+@router.get("/{batch_id}/dedup", response_model=DedupJobOut)
+def get_dedup_status(batch_id: int, db: Session = Depends(get_db)):
+    """State of the last background dedup job: idle | running | done | error."""
+    _get_batch_or_404(batch_id, db)
+    from dedup import dedup_job_status
+    return DedupJobOut(**dedup_job_status(batch_id))

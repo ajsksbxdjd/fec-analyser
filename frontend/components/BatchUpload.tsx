@@ -16,6 +16,9 @@ interface Props {
 
 type Stage = "idle" | "uploading" | "inferring" | "completed" | "error";
 
+// Max images per batch — keep in sync with MAX_IMAGES in backend/routers/batches.py
+const MAX_IMAGES = 500;
+
 function fmtDuration(secs: number): string {
   const m = Math.floor(secs / 60);
   const s = Math.floor(secs % 60);
@@ -75,6 +78,12 @@ export default function BatchUpload({ onDone }: Props) {
     e.preventDefault();
     if (!name.trim()) { setError("Enter a sample label."); return; }
     if (files.length === 0) { setError("Add at least one file."); return; }
+    // ZIP contents can only be counted by the backend, which also refuses >MAX_IMAGES
+    const imageCount = files.filter((f) => !f.name.toLowerCase().endsWith(".zip")).length;
+    if (imageCount > MAX_IMAGES) {
+      setError(`Too many images: ${imageCount} selected, the maximum is ${MAX_IMAGES} per batch. Split them into smaller batches.`);
+      return;
+    }
     setError("");
 
     try {
@@ -181,7 +190,7 @@ export default function BatchUpload({ onDone }: Props) {
                 Drop images or a ZIP here
               </p>
               <p className="text-xs text-slate-400">
-                JPG · PNG · ZIP — up to 200 images, 50 MB each
+                JPG · PNG · ZIP — up to {MAX_IMAGES} images, 50 MB each
               </p>
             </>
           )}

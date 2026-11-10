@@ -167,6 +167,12 @@ class OverlapDecisionOut(BaseModel):
     duplicates_found: int
 
 
+class DedupJobOut(BaseModel):
+    state: str                          # idle | running | done | error
+    result: Optional["DedupOut"] = None
+    error: Optional[str] = None
+
+
 class DedupOut(BaseModel):
     batch_id: int
     total_images: int

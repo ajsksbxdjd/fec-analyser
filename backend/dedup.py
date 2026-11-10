@@ -52,6 +52,51 @@ class _BatchGuard:
             _running.discard(self.batch_id)
 
 
+# Last background dedup job per batch: {"state": running|done|error, "result", "error"}
+_jobs: dict[int, dict] = {}
+
+
+def start_dedup_job(batch_id: int) -> None:
+    """
+    Start a full dedup in a background thread and return immediately.
+
+    The dashboard polls dedup_job_status(). A request that waits ~1-2 min for
+    the result gets cut off by proxies / tunnels (Next.js dev proxy: 30 s,
+    Cloudflare: 100 s), so the button must not hold a request open.
+    """
+    with _running_lock:
+        if batch_id in _running:
+            raise DedupAlreadyRunning(f"Dedup is already running for batch {batch_id}")
+        _running.add(batch_id)  # claimed here so a double click gets a 409 at once
+        _jobs[batch_id] = {"state": "running", "result": None, "error": None}
+
+    def work() -> None:
+        from database import SessionLocal
+        db = SessionLocal()
+        try:
+            result = _run_full(db, batch_id)
+            _jobs[batch_id] = {"state": "done", "result": result, "error": None}
+        except Exception as e:
+            db.rollback()
+            print(f"[dedup] background job failed for batch {batch_id}: {e}")
+            _jobs[batch_id] = {"state": "error", "result": None, "error": str(e)}
+        finally:
+            db.close()
+            with _running_lock:
+                _running.discard(batch_id)
+
+    threading.Thread(target=work, name=f"dedup-{batch_id}", daemon=True).start()
+
+
+def dedup_job_status(batch_id: int) -> dict:
+    with _running_lock:
+        running = batch_id in _running
+    job = _jobs.get(batch_id)
+    if running:
+        return {"state": "running", "result": None, "error": None}
+    return job or {"state": "idle", "result": None, "error": None}
+
+
 def run_dedup_for_batch(db: Session, batch_id: int) -> dict:
     """Find overlaps from the images, then recompute duplicate flags. Commits."""
     with _BatchGuard(batch_id):

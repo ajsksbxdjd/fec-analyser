@@ -16,6 +16,8 @@ import {
   getBatchStatus,
   downloadReport,
   runDedup,
+  getDedupStatus,
+  waitForDedup,
   markNotDuplicate,
   getImageOverlaps,
 } from "@/lib/api";
@@ -31,7 +33,7 @@ import ImageAnnotator from "@/components/ImageAnnotator";
 import OverlapCompare from "@/components/OverlapCompare";
 import ImageListPanel from "@/components/ChecklistPanel";
 import InlineEdit from "@/components/InlineEdit";
-import { Hash, Calculator, CheckCircle2, TrendingUp, Download, Plus, Layers } from "lucide-react";
+import { Hash, Calculator, CheckCircle2, TrendingUp, Download, Plus, Loader2, X, AlertTriangle } from "lucide-react";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 function fmtDuration(secs: number): string {
@@ -81,14 +83,65 @@ export default function DashboardPage() {
   const [clientElapsed, setClientElapsed] = useState(0);
   const [inferCompleted, setInferCompleted] = useState<{ elapsed: number; total: number } | null>(null);
   const [error, setError] = useState("");
-  const [dedupRunning, setDedupRunning] = useState(false);
-  const [dedupMessage, setDedupMessage] = useState("");
+  // Overlap check (cross-image dedup) — runs automatically after YOLO.
+  //   idle     : not running (finished earlier, or nothing to report)
+  //   running  : in progress — counts may still go down
+  //   finished : just finished while this page was open — counts are final
+  //   error    : failed — offer a retry
+  const [dedupState, setDedupState] = useState<"idle" | "running" | "finished" | "error">("idle");
+  const [dedupError, setDedupError] = useState("");
   const [overlaps, setOverlaps] = useState<OverlapPartner[]>([]);
   const [showOverlaps, setShowOverlaps] = useState(true);
   const [compare, setCompare] = useState<{ partner: OverlapPartner; focus: number | null } | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const clientTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const clientElapsedRef = useRef(0);
+
+  // ── background dedup (runs automatically after YOLO) ───────────────────────
+  // The dashboard opens as soon as YOLO is done; if the overlap check is still
+  // running, show that and refresh the counts when it finishes.
+  const currentImageIdRef = useRef<number | null>(null);
+  const unmountedRef = useRef(false);
+  useEffect(() => {
+    unmountedRef.current = false; // reset: React dev mode mounts effects twice
+    return () => { unmountedRef.current = true; };
+  }, []);
+
+  // There is no manual "dedup" button: the check always runs by itself. This
+  // follows a running check, and starts one for batches that never had it
+  // (older batches, or a check lost when the backend restarted). `retry`
+  // starts a new check after a failure.
+  const watchDedup = useCallback(async (retry = false) => {
+    const cancelled = () => unmountedRef.current;
+    try {
+      const job = await getDedupStatus(batchId);
+      if (job.state !== "running" && !retry) {
+        if (job.state === "error") {
+          setDedupError(job.error ?? "Unknown error");
+          setDedupState("error");
+          return;
+        }
+        const s = await getBatchSummary(batchId);
+        if (s.overlap_pairs !== null) return;   // already checked earlier
+      }
+      setDedupError("");
+      setDedupState("running");
+      const r = job.state === "running"
+        ? await waitForDedup(batchId, cancelled)
+        : await runDedup(batchId, cancelled);   // 409 = already started → just waits
+      if (!r || cancelled()) return;
+      const [s, imgs] = await Promise.all([getBatchSummary(batchId), listImages(batchId)]);
+      setSummary(s);
+      setImageList(imgs);  // also reloads the open image's boxes + overlaps
+      const idx = imgs.findIndex((row) => row.id === currentImageIdRef.current);
+      if (idx !== -1) setCurrentIndex(idx);
+      setDedupState("finished");
+    } catch (e) {
+      if (cancelled()) return;
+      setDedupError(e instanceof Error ? e.message : String(e));
+      setDedupState("error");
+    }
+  }, [batchId]);
 
   // ── initial load ──────────────────────────────────────────────────────────
   const loadDashboard = useCallback(async () => {
@@ -137,11 +190,12 @@ export default function DashboardPage() {
                 });
                 await loadDashboard();   // data arrives first
                 setProcessing(false);    // then reveal the dashboard (no blank flash)
+                watchDedup();            // overlap check continues in the background
               }
             } catch { /* keep polling */ }
           }, 1500);
         } else {
-          loadDashboard();
+          loadDashboard().then(() => watchDedup());
         }
       })
       .catch(() => loadDashboard());
@@ -150,13 +204,14 @@ export default function DashboardPage() {
       if (pollRef.current) clearInterval(pollRef.current);
       if (clientTimerRef.current) clearInterval(clientTimerRef.current);
     };
-  }, [batchId, loadDashboard]);
+  }, [batchId, loadDashboard, watchDedup]);
 
   // ── load image detail when selection changes ──────────────────────────────
   useEffect(() => {
     if (imageList.length === 0) return;
     const row = imageList[currentIndex];
     if (!row) return;
+    currentImageIdRef.current = row.id;
     setSelectedId(null);
     getImage(row.id).then(setImageDetail).catch(console.error);
     getImageOverlaps(row.id).then(setOverlaps).catch(() => setOverlaps([]));
@@ -259,26 +314,6 @@ export default function DashboardPage() {
       setCurrentIndex(idx);
       setSelectedId(null);
       setAddMode(false);
-    }
-  };
-
-  // ── cross-image dedup ─────────────────────────────────────────────────────
-  const handleRunDedup = async () => {
-    setDedupRunning(true);
-    setDedupMessage("");
-    try {
-      const r = await runDedup(batchId);
-      setDedupMessage(
-        `${r.overlap_pairs} overlapping pair${r.overlap_pairs !== 1 ? "s" : ""} · ` +
-        `${r.duplicates_found} duplicate${r.duplicates_found !== 1 ? "s" : ""} excluded · ` +
-        `${r.elapsed_seconds.toFixed(1)}s`
-      );
-      setSelectedId(null);
-      await refreshKeepingImage();
-    } catch (e) {
-      setDedupMessage(`Dedup failed: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setDedupRunning(false);
     }
   };
 
@@ -463,17 +498,6 @@ export default function DashboardPage() {
           </button>
         </div>
 
-        {/* Re-run cross-image dedup */}
-        <button
-          onClick={handleRunDedup}
-          disabled={dedupRunning}
-          title="Find overlapping images and exclude eggs counted twice"
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-slate-100 text-slate-700 rounded-lg hover:bg-slate-200 disabled:opacity-50 transition-colors flex-shrink-0"
-        >
-          <Layers size={13} strokeWidth={2} />
-          {dedupRunning ? "Deduplicating…" : "Dedup overlaps"}
-        </button>
-
         {/* Download CSV */}
         <button
           onClick={handleDownload}
@@ -484,27 +508,85 @@ export default function DashboardPage() {
         </button>
       </div>
 
+      {/* ── 1b. Overlap check status ─────────────────────────────────────── */}
+      {dedupState === "running" && (
+        <div className="flex items-center gap-3 px-6 py-3 bg-blue-50 border-b border-blue-200 flex-shrink-0">
+          <Loader2 size={18} strokeWidth={2.25} className="text-blue-600 animate-spin flex-shrink-0" />
+          <div className="text-sm text-blue-900">
+            <p className="font-semibold">Checking for overlapping images…</p>
+            <p className="text-xs text-blue-800/80">
+              The same egg can appear in two overlapping photos. Total eggs and EPG may still go down
+              until this finishes (usually 1–3 min; longer for big batches). You can keep reviewing meanwhile.
+            </p>
+          </div>
+        </div>
+      )}
+      {dedupState === "finished" && (
+        <div className="flex items-center gap-3 px-6 py-3 bg-green-50 border-b border-green-200 flex-shrink-0">
+          <CheckCircle2 size={18} strokeWidth={2.25} className="text-green-600 flex-shrink-0" />
+          <div className="text-sm text-green-900 flex-1">
+            <p className="font-semibold">Overlap check finished — Total eggs and EPG are final.</p>
+            <p className="text-xs text-green-800/80 tabular-nums">
+              {summary.duplicate_count} duplicate egg{summary.duplicate_count !== 1 ? "s" : ""} excluded
+              across {summary.overlap_pairs ?? 0} overlapping image pair{summary.overlap_pairs !== 1 ? "s" : ""}.
+            </p>
+          </div>
+          <button
+            onClick={() => setDedupState("idle")}
+            title="Dismiss"
+            className="p-1 rounded-md text-green-700 hover:bg-green-100 transition-colors flex-shrink-0"
+          >
+            <X size={16} strokeWidth={2} />
+          </button>
+        </div>
+      )}
+      {dedupState === "error" && (
+        <div className="flex items-center gap-3 px-6 py-3 bg-red-50 border-b border-red-200 flex-shrink-0">
+          <AlertTriangle size={18} strokeWidth={2.25} className="text-red-600 flex-shrink-0" />
+          <div className="text-sm text-red-900 flex-1 min-w-0">
+            <p className="font-semibold">Overlap check failed — eggs seen in two overlapping images may be counted twice.</p>
+            <p className="text-xs text-red-800/80 truncate">{dedupError}</p>
+          </div>
+          <button
+            onClick={() => watchDedup(true)}
+            className="px-3 py-1.5 text-xs font-semibold bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors flex-shrink-0"
+          >
+            Try again
+          </button>
+        </div>
+      )}
+
       {/* ── 2. Dashboard header ──────────────────────────────────────────── */}
       <div className="px-6 py-5 bg-white border-b border-gray-200 flex-shrink-0 space-y-4">
 
         {/* Metric cards — neutral tint, accent blue numbers */}
         <div className="grid grid-cols-4 gap-4">
           {([
-            { label: "Total Eggs",      Icon: Hash,         value: summary.total_eggs.toLocaleString()   },
-            { label: "EPG (×24)",       Icon: Calculator,   value: summary.epg.toLocaleString()          },
-            { label: "Images Reviewed", Icon: CheckCircle2, value: summary.image_count.toLocaleString()  },
+            { label: "Total Eggs",      Icon: Hash,         value: summary.total_eggs.toLocaleString(),  pending: true  },
+            { label: "EPG (×24)",       Icon: Calculator,   value: summary.epg.toLocaleString(),         pending: true  },
+            { label: "Images Reviewed", Icon: CheckCircle2, value: summary.image_count.toLocaleString(), pending: false },
             {
               label: "Avg Confidence",
               Icon:  TrendingUp,
               value: summary.avg_confidence !== null
                 ? `${Math.round(summary.avg_confidence * 100)}%`
                 : "—",
+              pending: false,
             },
-          ] as const).map(({ label, Icon, value }) => (
+          ] as const).map(({ label, Icon, value, pending }) => (
             <div key={label} className="border border-gray-200 rounded-xl px-5 py-4 bg-slate-50">
               <div className="flex items-center gap-1.5 mb-1">
                 <Icon size={13} strokeWidth={1.75} className="text-slate-400" />
                 <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">{label}</p>
+                {pending && dedupState === "running" && (
+                  <span
+                    title="May still go down while the overlap check runs"
+                    className="ml-auto inline-flex items-center gap-1 text-[10px] font-medium text-blue-700 bg-blue-50 border border-blue-200 px-1.5 py-px rounded-full"
+                  >
+                    <Loader2 size={10} strokeWidth={2.5} className="animate-spin" />
+                    updating
+                  </span>
+                )}
               </div>
               <p className="text-[32px] font-bold text-blue-600 tabular-nums leading-none">
                 {value}
@@ -534,11 +616,11 @@ export default function DashboardPage() {
                 )}
               </p>
               <p className={`text-xs mt-1 opacity-70 ${ic.text} tabular-nums`}>
-                {dedupMessage
-                  ? `Dedup: ${dedupMessage}`
-                  : summary.overlap_pairs === null
-                  ? "Overlap dedup has not run for this batch yet"
-                  : `${summary.duplicate_count} duplicate box${summary.duplicate_count !== 1 ? "es" : ""} excluded across ${summary.overlap_pairs} overlapping image pair${summary.overlap_pairs !== 1 ? "s" : ""}`}
+                {dedupState === "running"
+                  ? "⏳ Overlap check in progress…"
+                  : dedupState === "error" || summary.overlap_pairs === null
+                  ? "⚠ Overlap check not completed"
+                  : `✓ Overlap check done · ${summary.duplicate_count} duplicate egg${summary.duplicate_count !== 1 ? "s" : ""} excluded across ${summary.overlap_pairs} overlapping image pair${summary.overlap_pairs !== 1 ? "s" : ""}`}
               </p>
             </div>
 

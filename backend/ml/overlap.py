@@ -35,11 +35,14 @@ import numpy as np
 # ── Tunable parameters ────────────────────────────────────────────────────────
 # MIN_GOOD_MATCHES and DEDUP_DISTANCE_PX are the most likely to need adjusting
 # against real slide data (check overlap_debug_report.json after a run).
-# 500 px / 1000 features: on real slide crops with 30% overlap, the original
-# 250 px / 200 features found < 15 matches on 4 of 6 pairs; this setting gave
-# 63+ inliers on every pair, while non-overlapping images stayed at 0-5.
+# Speed vs. accuracy (benchmarked on 611 real slide images; matching time
+# grows with features^2 and with images^2):
+#   250 px / 200 features : match  34 s, caught  8/12 synthetic + 1/2 real overlaps
+#   500 px / 500 features : match 208 s, caught 12/12 synthetic + 2/2 real   <- used
+#   500 px / 1000 features: match 641 s, caught 12/12 synthetic + 2/2 real
+# (200 images is ~9x fewer pairs than 611.)
 ORB_WORKING_WIDTH = 500
-ORB_MAX_FEATURES = 1000
+ORB_MAX_FEATURES = 500
 RATIO_TEST_THRESH = 0.75
 MIN_GOOD_MATCHES = 15
 MIN_INLIER_MATCHES = 10

@@ -80,23 +80,20 @@ def _run_batch_inference(batch_id: int) -> None:
         batch.elapsed_seconds = round(elapsed, 2)
         db.commit()
 
-        # ── Cross-image dedup (overlapping fields of view) ────────────────────
-        # Runs before status flips to "done" so the dashboard opens with the
-        # deduplicated count. A dedup failure never fails the batch.
-        try:
-            from dedup import run_dedup_for_batch
-            result = run_dedup_for_batch(db, batch_id)
-            print(
-                f"[inference] Dedup done: {result['overlap_pairs']} overlapping pairs, "
-                f"{result['duplicates_found']} duplicate boxes ({result['elapsed_seconds']}s)"
-            )
-        except Exception as e:
-            db.rollback()
-            print(f"[inference] Dedup failed for batch {batch_id}: {e}")
-            batch = db.query(Batch).filter(Batch.id == batch_id).first()
-
         batch.status = "done"
         db.commit()
+
+        # ── Cross-image dedup (overlapping fields of view) ────────────────────
+        # Runs in the background AFTER the batch is marked done, so the
+        # dashboard opens as soon as YOLO finishes (dedup takes ~1-2 min on
+        # 200 images). The dashboard shows "checking for overlaps" and updates
+        # the counts when it finishes. A dedup failure never fails the batch.
+        try:
+            from dedup import start_dedup_job
+            start_dedup_job(batch_id)
+            print(f"[inference] Dedup started in background for batch {batch_id}")
+        except Exception as e:
+            print(f"[inference] Could not start dedup for batch {batch_id}: {e}")
 
     except Exception as e:
         print(f"[inference] Fatal error for batch {batch_id}: {e}")
