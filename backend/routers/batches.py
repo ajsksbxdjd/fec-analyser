@@ -88,9 +88,37 @@ def _is_unsafe_zip_path(member_name: str) -> bool:
     return name.startswith("/") or (len(name) > 1 and name[1] == ":") or ".." in name.split("/")
 
 
-def _safe_extract_zip(zip_bytes: bytes, dest_dir: Path) -> tuple[list[Path], list[dict]]:
+def _unique_path(dest_dir: Path, name: str, taken: set[str]) -> Path:
     """
-    Extract the images of a ZIP into dest_dir (folders flattened).
+    A path in dest_dir that no other image of this batch uses: 'IMG_0001.jpg',
+    else 'IMG_0001_2.jpg', 'IMG_0001_3.jpg', ...
+
+    Two files with the same name (same name in two ZIP folders, or in two
+    chunked tunnel requests) would otherwise overwrite each other on disk while
+    both get an Image row — one image inferred twice, its eggs counted twice.
+
+    `taken` holds lowercase names already used by this batch (DB rows + this
+    request); the chosen name is added to it. The on-disk check also catches
+    files left from earlier uploads. Lowercase because Windows paths ignore case.
+    """
+    stem, suffix = Path(name).stem, Path(name).suffix
+    candidate, n = name, 1
+    while candidate.lower() in taken or (dest_dir / candidate).exists():
+        n += 1
+        candidate = f"{stem}_{n}{suffix}"
+    taken.add(candidate.lower())
+    return dest_dir / candidate
+
+
+def _inside_dir(path: Path, dest_dir: Path) -> bool:
+    """Path traversal guard: the final file must sit directly in dest_dir."""
+    return path.resolve().parent == dest_dir.resolve()
+
+
+def _safe_extract_zip(zip_bytes: bytes, dest_dir: Path, taken: set[str]) -> tuple[list[Path], list[dict]]:
+    """
+    Extract the images of a ZIP into dest_dir (folders flattened; clashing
+    names get _2, _3, ... via _unique_path).
     Returns (extracted image paths, skipped files as {name, reason}).
     """
     extracted: list[Path] = []
@@ -111,14 +139,18 @@ def _safe_extract_zip(zip_bytes: bytes, dest_dir: Path) -> tuple[list[Path], lis
             if member.file_size > MAX_FILE_SIZE:
                 skipped.append({"name": member.filename, "reason": SKIP_SIZE})
                 continue
-            target = (dest_dir / safe_name).resolve()
-            if not str(target).startswith(str(dest_dir.resolve())):
+            target = _unique_path(dest_dir, safe_name, taken)
+            if not _inside_dir(target, dest_dir):
+                taken.discard(target.name.lower())
                 skipped.append({"name": member.filename, "reason": SKIP_UNSAFE})  # path traversal guard
                 continue
+            if target.name != safe_name:
+                print(f"[upload] name clash: {member.filename} saved as {target.name}")
             with zf.open(member) as src, open(target, "wb") as dst:
                 dst.write(src.read())
             if not _is_readable_image(target):
                 target.unlink(missing_ok=True)
+                taken.discard(target.name.lower())
                 skipped.append({"name": member.filename, "reason": SKIP_CORRUPT})
                 continue
             extracted.append(target)
@@ -307,6 +339,12 @@ async def upload_images(
     dest_dir.mkdir(parents=True, exist_ok=True)
     saved_paths: list[Path] = []
     skipped: list[dict] = []   # every file NOT added, with the reason — returned to the user
+    # Names this batch already uses (earlier uploads / chunks), so a repeated
+    # name gets a new file instead of overwriting one that already has a row
+    taken = {
+        fn.lower()
+        for (fn,) in db.query(Image.filename).filter(Image.batch_id == batch_id).all()
+    }
 
     for upload in files:
         data = await upload.read()
@@ -315,7 +353,7 @@ async def upload_images(
 
         if ext == ".zip":
             try:
-                extracted, zip_skipped = _safe_extract_zip(data, dest_dir)
+                extracted, zip_skipped = _safe_extract_zip(data, dest_dir, taken)
             except zipfile.BadZipFile:
                 skipped.append({"name": name, "reason": SKIP_BAD_ZIP})
                 continue
@@ -326,10 +364,17 @@ async def upload_images(
         elif len(data) > MAX_FILE_SIZE:
             skipped.append({"name": name, "reason": SKIP_SIZE})
         else:
-            target = dest_dir / name
+            target = _unique_path(dest_dir, name, taken)
+            if not _inside_dir(target, dest_dir):
+                taken.discard(target.name.lower())
+                skipped.append({"name": name, "reason": SKIP_UNSAFE})
+                continue
+            if target.name != name:
+                print(f"[upload] name clash: {name} saved as {target.name}")
             target.write_bytes(data)
             if not _is_readable_image(target):
                 target.unlink(missing_ok=True)
+                taken.discard(target.name.lower())
                 skipped.append({"name": name, "reason": SKIP_CORRUPT})
                 continue
             saved_paths.append(target)

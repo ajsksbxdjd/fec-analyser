@@ -1,12 +1,12 @@
 # FEC Analyser — Fecal Egg Count Tool
 
-A full-stack web application for automated hookworm egg detection and counting in microscopy images. Upload fecal flotation slide images, run YOLOv8 inference, and review results through an interactive annotation dashboard.
+A full-stack web application for automated hookworm egg detection and counting in microscopy images. Upload microscopy images of Kato-Katz thick smears, run YOLOv8 inference, and review results through an interactive annotation dashboard.
 
 ---
 
 ## What it does
 
-- **Automated detection** — runs YOLOv8s on batches of microscopy images to locate and count hookworm eggs
+- **Automated detection** — runs YOLOv8n on batches of microscopy images to locate and count hookworm eggs
 - **Adjustable confidence threshold** — boxes below the threshold are flagged "needs review" and float to the top of the image list; changing the threshold re-buckets everything instantly without re-running inference
 - **Per-box review workflow** — confirm or remove individual low-confidence detections; add manual annotations by drawing boxes directly on the image
 - **Live dashboard** — EPG (eggs per gram × 24), infection severity (WHO hookworm scale: Light / Moderate / Heavy), average YOLO confidence, and a per-image review checklist that updates in real time
@@ -203,6 +203,46 @@ Open **http://localhost:3000** in your browser. Both terminals must stay running
 
 ---
 
+## Running for UAT (remote access)
+
+Use this when testers open the app from somewhere else (e.g. the lab), through a free Cloudflare quick tunnel. You need **three terminals**, and `cloudflared` installed ([download](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/)).
+
+### Terminal 1 — Backend (without `--reload`)
+
+```bash
+cd backend
+venv\Scripts\activate
+uvicorn main:app --host 0.0.0.0
+```
+
+> Leave out `--reload` for UAT. It restarts the server whenever a Python file changes, and a restart in the middle of a session drops uploads in progress and running detection / overlap checks.
+
+### Terminal 2 — Frontend
+
+```bash
+cd frontend
+npm run dev
+```
+
+Open **http://localhost:3000** once yourself so the pages are compiled before testers arrive.
+
+### Terminal 3 — Tunnel
+
+```bash
+cloudflared tunnel --url http://localhost:3000
+```
+
+Only the frontend (port 3000) is tunnelled; it forwards API calls to the backend itself. After a few seconds `cloudflared` prints a box with a link like `https://some-random-words.trycloudflare.com` — **send that link to the testers**.
+
+### Things to know
+
+- **The link changes every time the tunnel restarts.** Send testers the new one after any restart.
+- **Keep the host computer on, plugged in and awake** (turn sleep off) — the link stops working when it sleeps or a terminal is closed.
+- **Limits:** up to **500 images per batch** and **50 MB per image**; larger uploads are refused with a message. Through the tunnel, uploads are sent in 40 MB pieces and a single file (e.g. a ZIP) must be under 95 MB.
+- **Upload speed depends on the tester's internet** (and the host's). On the host computer itself, use http://localhost:3000 for fast uploads.
+
+---
+
 ## How to use
 
 1. **Create a batch** — on the workspace, enter a sample label, drop in JPG / PNG images or a ZIP archive, and click **Start analysis**
@@ -242,3 +282,9 @@ To tune performance, edit `backend/ml/detector.py`:
 | `npm run dev` fails immediately | Run `npm install` inside the `frontend/` folder first |
 | Images don't appear after upload | Check that `backend/storage/uploads/` exists and the backend terminal shows no file-permission errors |
 | PowerShell blocks venv activation | Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then retry |
+
+---
+
+## Datasets and credits
+
+The detection model was trained on hookworm egg images from the **AI4NTD P1.5** and **AI4NTD P3.0** datasets, published on Kaggle by **peterkward**. Thanks to the dataset authors for making them available.
