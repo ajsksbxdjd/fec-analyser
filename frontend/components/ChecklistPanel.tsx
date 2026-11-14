@@ -1,8 +1,33 @@
 "use client";
 
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 import Image from "next/image";
+import { ImageOff } from "lucide-react";
 import type { ImageListRow } from "@/lib/types";
+
+/** List thumbnail; shows an icon instead of a broken image when the file is unreadable. */
+function Thumbnail({ img }: { img: ImageListRow }) {
+  const src = `/uploads/${img.batch_id}/${img.filename}`;
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  return (
+    <div className="relative h-10 w-10 flex-shrink-0 rounded-md overflow-hidden bg-slate-100">
+      {failedSrc === src ? (
+        <div className="h-full w-full flex items-center justify-center" title="Image couldn't be loaded — open it to retry">
+          <ImageOff size={16} strokeWidth={1.75} className="text-slate-400" />
+        </div>
+      ) : (
+        <Image
+          src={src}
+          alt={img.filename}
+          fill
+          className="object-cover"
+          unoptimized
+          onError={() => setFailedSrc(src)}
+        />
+      )}
+    </div>
+  );
+}
 
 interface Props {
   images: ImageListRow[];
@@ -102,15 +127,7 @@ export default function ImageListPanel({ images, currentIndex, onSelect }: Props
                   }`}
                 >
                   {/* Thumbnail */}
-                  <div className="relative h-10 w-10 flex-shrink-0 rounded-md overflow-hidden bg-slate-100">
-                    <Image
-                      src={`/uploads/${img.batch_id}/${img.filename}`}
-                      alt={img.filename}
-                      fill
-                      className="object-cover"
-                      unoptimized
-                    />
-                  </div>
+                  <Thumbnail img={img} />
 
                   {/* Info */}
                   <div className="flex-1 min-w-0">
@@ -135,6 +152,14 @@ export default function ImageListPanel({ images, currentIndex, onSelect }: Props
                       {img.duplicate_count > 0 && (
                         <span className="text-[10px] text-slate-500 bg-slate-100 px-1.5 py-px rounded font-medium tabular-nums">
                           {img.duplicate_count} dup
+                        </span>
+                      )}
+                      {img.inference_failed && (
+                        <span
+                          className="text-[10px] text-red-700 bg-red-50 border border-red-200 px-1.5 py-px rounded font-medium"
+                          title="The detector could not read this image on the last run"
+                        >
+                          Could not process
                         </span>
                       )}
                       {img.is_checked && !img.needs_review && (

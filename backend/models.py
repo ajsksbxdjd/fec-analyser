@@ -29,6 +29,7 @@ class Image(Base):
     filename = Column(String, nullable=False)
     filepath = Column(String, nullable=False)  # relative: uploads/{batch_id}/{filename}
     is_checked = Column(Boolean, default=False)
+    inference_failed = Column(Boolean, default=False)  # YOLO could not process this image (last run)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     batch = relationship("Batch", back_populates="images")

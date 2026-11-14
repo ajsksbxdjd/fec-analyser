@@ -44,6 +44,7 @@ def run_migrations():
         ("detections", "keep_override",      "ALTER TABLE detections ADD COLUMN keep_override BOOLEAN DEFAULT 0"),
         ("image_overlaps", "match_points",   "ALTER TABLE image_overlaps ADD COLUMN match_points TEXT"),
         ("image_overlaps", "status",         "ALTER TABLE image_overlaps ADD COLUMN status VARCHAR DEFAULT 'auto'"),
+        ("images",     "inference_failed",   "ALTER TABLE images ADD COLUMN inference_failed BOOLEAN DEFAULT 0"),
     ]
     with engine.begin() as conn:
         for table, column, ddl in migrations:

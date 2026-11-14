@@ -69,6 +69,7 @@ class OverlapStats:
     match_count_max: int = 0
     match_count_median: float = 0.0
     match_count_histogram: dict[str, int] = field(default_factory=dict)
+    unreadable_images: list[str] = field(default_factory=list)  # skipped: could not be read
 
 
 @dataclass
@@ -123,6 +124,7 @@ class _ImageDesc:
     scale: float
     keypoints: list
     descriptors: np.ndarray | None
+    readable: bool = True
 
 
 @dataclass
@@ -198,11 +200,24 @@ def _load_and_resize_gray(path: str) -> tuple[np.ndarray, int, int, float]:
 
 
 def _describe_images(image_paths: list[str]) -> list[_ImageDesc]:
+    """
+    ORB features per image. An image that can't be read (corrupted, damaged
+    on disk) gets no features instead of failing the whole batch: it simply
+    never matches anything, and the other images are still checked.
+    """
     orb = cv2.ORB_create(nfeatures=ORB_MAX_FEATURES)
     cache: list[_ImageDesc] = []
     for path in image_paths:
-        gray, orig_w, orig_h, scale = _load_and_resize_gray(path)
-        keypoints, descriptors = orb.detectAndCompute(gray, None)
+        try:
+            gray, orig_w, orig_h, scale = _load_and_resize_gray(path)
+            keypoints, descriptors = orb.detectAndCompute(gray, None)
+        except (ValueError, cv2.error) as e:
+            print(f"[overlap] skipping unreadable image {Path(path).name}: {e}")
+            cache.append(_ImageDesc(
+                path=path, orig_w=0, orig_h=0, scale=1.0,
+                keypoints=[], descriptors=None, readable=False,
+            ))
+            continue
         cache.append(_ImageDesc(
             path=path,
             orig_w=orig_w,
@@ -510,6 +525,7 @@ def find_overlaps(
     stats.total_pairs_checked = len(records)
     stats.candidate_pairs = len(candidates)
     stats.confirmed_pairs = len(confirmed)
+    stats.unreadable_images = [image_names[k] for k, c in enumerate(cache) if not c.readable]
     stats.elapsed_seconds = round(time.perf_counter() - start, 2)
     if all_good_counts:
         stats.match_count_min = min(all_good_counts)
@@ -521,6 +537,7 @@ def find_overlaps(
         f"[overlap] {stats.total_images} images — "
         f"{stats.candidate_pairs}/{stats.total_pairs_checked} candidate pairs, "
         f"{stats.confirmed_pairs} confirmed — {stats.elapsed_seconds:.2f}s"
+        + (f" ({len(stats.unreadable_images)} unreadable image(s) skipped)" if stats.unreadable_images else "")
     )
     print(
         f"[overlap] good-match counts — min={stats.match_count_min} "

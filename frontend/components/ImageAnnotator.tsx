@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { ImageOff, RotateCw } from "lucide-react";
 import type { Detection, DetectionCreate } from "@/lib/types";
 
 interface Props {
@@ -17,6 +18,12 @@ interface Props {
   /** Boxes to ring in fuchsia (e.g. a duplicate and the box it duplicates). */
   highlightIds?: number[];
   hideLegend?: boolean;
+  /**
+   * The backend already found this file unreadable ("Could not process").
+   * Only then does the placeholder say the file is damaged; otherwise a failed
+   * load is more likely a network hiccup (slow tunnel, server restart).
+   */
+  knownUnreadable?: boolean;
 }
 
 export interface OverlapRegion {
@@ -69,10 +76,21 @@ export default function ImageAnnotator({
   overlapRegions = [],
   highlightIds = [],
   hideLegend = false,
+  knownUnreadable = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const dragStart    = useRef<{ x: number; y: number } | null>(null);
   const [dragBox, setDragBox] = useState<DragBox | null>(null);
+  // Retry attempts for the current image. Stored with the src it belongs to,
+  // so switching to another image starts again at 0 by itself.
+  const [retry, setRetry] = useState({ src: imageSrc, n: 0 });
+  const attempt = retry.src === imageSrc ? retry.n : 0;
+  // A retry adds ?retry=N so the browser makes a fresh request instead of reusing the failed one
+  const displaySrc = attempt > 0
+    ? `${imageSrc}${imageSrc.includes("?") ? "&" : "?"}retry=${attempt}`
+    : imageSrc;
+  // The src the browser failed to display (network problem or unreadable file)
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
 
   // Convert a mouse event to 0-1 normalized coords relative to the container
   const toNorm = (e: React.MouseEvent) => {
@@ -143,6 +161,54 @@ export default function ImageAnnotator({
 
   const visible = detections.filter((d) => !d.is_deleted);
 
+  // Image failed to load: a clear placeholder instead of a broken-image icon
+  // with boxes floating over nothing. Boxes can't be drawn or edited without it.
+  if (failedSrc === displaySrc) {
+    return (
+      <div className="w-full p-4">
+        <div className="w-full aspect-[4/3] max-h-[70vh] flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed border-slate-300 bg-slate-100 px-6 text-center">
+          <ImageOff size={40} strokeWidth={1.5} className="text-slate-400" />
+          {knownUnreadable ? (
+            <>
+              <p className="text-sm font-semibold text-slate-700">This image can&apos;t be displayed</p>
+              <p className="text-xs text-slate-500 max-w-sm">
+                The detector also couldn&apos;t read this file, so it&apos;s likely damaged or not a valid
+                image. If you have the original, upload it again in a new batch.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm font-semibold text-slate-700">This image couldn&apos;t be loaded</p>
+              <p className="text-xs text-slate-500 max-w-sm">
+                This usually means a slow or interrupted connection, and the file itself is fine.
+                Try again in a moment.
+              </p>
+            </>
+          )}
+          <button
+            onClick={() => setRetry({ src: imageSrc, n: attempt + 1 })}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-white text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+          >
+            <RotateCw size={13} strokeWidth={2} />
+            Retry
+          </button>
+          {attempt > 0 && (
+            <p className="text-[11px] text-slate-400 tabular-nums">
+              Tried {attempt + 1} times
+              {!knownUnreadable && attempt >= 2 && " — if this keeps failing, the file may be missing or damaged"}
+            </p>
+          )}
+          {visible.length > 0 && (
+            <p className="text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1">
+              {visible.length} box{visible.length !== 1 ? "es" : ""} from an earlier run still belong{visible.length === 1 ? "s" : ""} to
+              this image and can&apos;t be checked here
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="w-full">
       {/*
@@ -162,10 +228,11 @@ export default function ImageAnnotator({
       >
         {/* ── Image ── 100% panel width, auto height, aspect ratio preserved */}
         <img
-          src={imageSrc}
+          src={displaySrc}
           alt="microscopy image"
           draggable={false}
           style={{ display: "block", width: "100%", height: "auto" }}
+          onError={() => setFailedSrc(displaySrc)}
         />
 
         {/* ── Overlap shading ── areas also visible in another image */}

@@ -11,7 +11,9 @@ import type {
   OverlapPartner,
   OverlapStatus,
   Progress,
+  SkippedFile,
   Summary,
+  UploadResult,
 } from "./types";
 
 // JSON API calls go through the Next.js rewrite proxy (/api/* → :8000/api/*)
@@ -88,7 +90,7 @@ function postFiles(
   url: string,
   files: File[],
   onLoaded: (loaded: number) => void,
-): Promise<Batch> {
+): Promise<UploadResult> {
   return new Promise((resolve, reject) => {
     const form = new FormData();
     files.forEach((f) => form.append("files", f));
@@ -101,12 +103,19 @@ function postFiles(
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
-          resolve(JSON.parse(xhr.responseText) as Batch);
+          const res = JSON.parse(xhr.responseText) as UploadResult;
+          resolve({ ...res, skipped: res.skipped ?? [] });
         } catch {
           reject(new Error("Invalid JSON response from server"));
         }
       } else {
-        reject(new Error(`${xhr.status}: ${xhr.responseText || xhr.statusText}`));
+        // FastAPI errors are {"detail": "..."} — show just the message
+        let message = xhr.responseText || xhr.statusText;
+        try {
+          const body = JSON.parse(xhr.responseText);
+          if (typeof body?.detail === "string") message = body.detail;
+        } catch { /* not JSON — keep the raw text */ }
+        reject(new Error(message));
       }
     };
     xhr.onerror = () => reject(new Error("Upload failed — check the backend is running"));
@@ -123,12 +132,15 @@ function postFiles(
  *    (no Next.js body-size limit at all).
  *  - Through a tunnel: several requests through the page's own address, each
  *    under TUNNEL_CHUNK_BYTES; the backend appends them to the same batch.
+ *
+ * The result's `skipped` lists every file the backend did not add (wrong type,
+ * too big, corrupted…), merged across all the requests.
  */
 export async function uploadImagesWithProgress(
   batchId: number,
   files: File[],
   onProgress: (pct: number) => void,
-): Promise<Batch> {
+): Promise<UploadResult> {
   if (isLocalNetwork()) {
     return postFiles(`${DIRECT_BACKEND}/api/batches/${batchId}/upload`, files, (loaded) => {
       const total = files.reduce((a, f) => a + f.size, 0) || 1;
@@ -160,16 +172,18 @@ export async function uploadImagesWithProgress(
 
   const total = files.reduce((a, f) => a + f.size, 0) || 1;
   let done = 0;
-  let last: Batch | null = null;
+  let last: UploadResult | null = null;
+  const skipped: SkippedFile[] = [];
   for (const chunk of chunks) {
     const chunkBytes = chunk.reduce((a, f) => a + f.size, 0);
     last = await postFiles(`${BASE}/batches/${batchId}/upload`, chunk, (loaded) => {
       onProgress(Math.min(100, Math.round(((done + Math.min(loaded, chunkBytes)) / total) * 100)));
     });
+    skipped.push(...last.skipped);
     done += chunkBytes;
   }
   onProgress(100);
-  return last!;
+  return { ...last!, skipped };
 }
 
 export const runInference = (batchId: number) =>

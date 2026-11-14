@@ -10,12 +10,36 @@ from schemas import ProgressOut
 router = APIRouter(prefix="/api/batches", tags=["inference"])
 
 
+def _save_detections(db: Session, img: Image, detections: list[dict]) -> None:
+    """Replace this image's YOLO detections with a fresh run's. No commit."""
+    # Remove previous YOLO detections so re-runs don't duplicate
+    db.query(Detection).filter(
+        Detection.image_id == img.id,
+        Detection.source == "yolo",
+    ).delete()
+
+    for d in detections:
+        db.add(Detection(
+            image_id=img.id,
+            x_center=d["x_center"],
+            y_center=d["y_center"],
+            width=d["width"],
+            height=d["height"],
+            confidence=d["confidence"],
+            source="yolo",
+            is_deleted=False,
+        ))
+    img.inference_failed = False  # succeeded this time (clears a failure from an earlier run)
+
+
 def _run_batch_inference(batch_id: int) -> None:
     """
     Background task — creates its own DB session (never reuse the request session).
 
     Images are processed in chunks matching BATCH_SIZE so the GPU does one
     forward pass per chunk. DB is committed once per chunk, not per image.
+    If a chunk fails, its images are retried one by one; images that still
+    fail are flagged inference_failed (shown in the UI and the CSV report).
     """
     db: Session = SessionLocal()
     try:
@@ -38,38 +62,37 @@ def _run_batch_inference(batch_id: int) -> None:
 
             try:
                 chunk_results = run_batch_inference(chunk_paths)
+                if len(chunk_results) != len(chunk):
+                    # Never pair detections with the wrong image
+                    raise RuntimeError(f"got {len(chunk_results)} results for {len(chunk)} images")
 
                 for img, detections in zip(chunk, chunk_results):
-                    # Remove previous YOLO detections so re-runs don't duplicate
-                    db.query(Detection).filter(
-                        Detection.image_id == img.id,
-                        Detection.source == "yolo",
-                    ).delete()
-
-                    for d in detections:
-                        db.add(Detection(
-                            image_id=img.id,
-                            x_center=d["x_center"],
-                            y_center=d["y_center"],
-                            width=d["width"],
-                            height=d["height"],
-                            confidence=d["confidence"],
-                            source="yolo",
-                            is_deleted=False,
-                        ))
-
+                    _save_detections(db, img, detections)
                     batch.processed_count += 1
 
                 # One commit per chunk — much less DB lock overhead than per image
                 db.commit()
 
             except Exception as e:
-                print(f"[inference] Error on chunk {chunk_start}–{chunk_start + len(chunk)}: {e}")
+                # One bad image fails the whole chunk. Undo the chunk, then retry
+                # its images one by one so the good ones still get detections.
+                print(
+                    f"[inference] Chunk {chunk_start}–{chunk_start + len(chunk)} failed ({e}); "
+                    "retrying its images one at a time"
+                )
                 db.rollback()
-                # Mark images in this chunk as processed so the count stays accurate
-                batch.processed_count += len(chunk)
-                db.commit()
-                continue
+                for img, path in zip(chunk, chunk_paths):
+                    try:
+                        detections = run_batch_inference([path])[0]
+                        _save_detections(db, img, detections)
+                        batch.processed_count += 1
+                        db.commit()
+                    except Exception as img_err:
+                        db.rollback()
+                        print(f"[inference] Could not process {img.filename}: {img_err}")
+                        img.inference_failed = True
+                        batch.processed_count += 1  # still counts as handled
+                        db.commit()
 
         # ── Stop timer, persist, log ──────────────────────────────────────────
         elapsed = time.perf_counter() - t0

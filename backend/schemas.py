@@ -53,6 +53,7 @@ class ImageListRow(BaseModel):
     is_checked: bool
     duplicate_count: int = 0  # boxes hidden because the egg is counted in an overlapping image
     overlap_count: int = 0    # how many other images overlap this one     # True when a human has explicitly marked this image as reviewed
+    inference_failed: bool = False  # YOLO could not process this image
 
 
 class ImageDetail(BaseModel):
@@ -90,6 +91,16 @@ class BatchOut(BaseModel):
     image_count: int
     processed_count: int
     confidence_threshold: float
+
+
+class SkippedFile(BaseModel):
+    name: str
+    reason: str   # unsupported file type | larger than 50 MB | corrupted or unreadable image | unsafe path in ZIP | ...
+
+
+class UploadOut(BatchOut):
+    """Upload response: the batch, plus every file that was NOT added and why."""
+    skipped: list[SkippedFile] = []
 
 
 class BatchListRow(BatchOut):
@@ -141,6 +152,7 @@ class SummaryOut(BaseModel):
     threshold: float
     duplicate_count: int = 0             # boxes excluded as cross-image duplicates
     overlap_pairs: Optional[int] = None  # confirmed overlapping image pairs; None = dedup never ran
+    failed_images: int = 0               # images YOLO could not process on the last run
     images: list[SummaryImageRow]
 
 

@@ -4,6 +4,7 @@ import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from PIL import Image as PILImage
 from sqlalchemy.orm import Session
 
 from database import get_db
@@ -26,6 +27,7 @@ from schemas import (
     SummaryImageRow,
     SummaryOut,
     ThresholdUpdate,
+    UploadOut,
 )
 
 router = APIRouter(prefix="/api/batches", tags=["batches"])
@@ -42,24 +44,92 @@ def _upload_dir(batch_id: int) -> Path:
     return STORAGE_ROOT / "uploads" / str(batch_id)
 
 
-def _safe_extract_zip(zip_bytes: bytes, dest_dir: Path) -> list[Path]:
-    extracted = []
+# Reasons shown to the user for files that were not added to the batch
+SKIP_TYPE = "unsupported file type"
+SKIP_SIZE = "larger than 50 MB"
+SKIP_CORRUPT = "corrupted or unreadable image"
+SKIP_UNSAFE = "unsafe path in ZIP"
+SKIP_BAD_ZIP = "corrupted or unreadable ZIP file"
+
+# OS clutter that ZIP tools add (macOS resource forks, Windows thumbnails).
+# Ignored without a warning — they are not files the user chose to upload.
+_ZIP_JUNK_DIRS = {"__MACOSX"}
+_ZIP_JUNK_FILES = {".ds_store", "thumbs.db", "desktop.ini"}
+
+
+def _is_readable_image(path: Path) -> bool:
+    """
+    True when Pillow can fully decode the file. verify() checks the structure;
+    it can't be followed by load() on the same object, so the file is reopened
+    and load() decodes every pixel — that catches truncated / half-written files.
+    """
+    try:
+        with PILImage.open(path) as im:
+            im.verify()
+        with PILImage.open(path) as im:
+            im.load()
+        return True
+    except Exception:
+        return False
+
+
+def _is_zip_junk(member_name: str) -> bool:
+    parts = Path(member_name.replace("\\", "/")).parts
+    return (
+        any(p in _ZIP_JUNK_DIRS for p in parts)
+        or Path(member_name).name.lower() in _ZIP_JUNK_FILES
+        or Path(member_name).name.startswith("._")
+    )
+
+
+def _is_unsafe_zip_path(member_name: str) -> bool:
+    """Absolute paths or '..' segments — a ZIP trying to write outside its folder."""
+    name = member_name.replace("\\", "/")
+    return name.startswith("/") or (len(name) > 1 and name[1] == ":") or ".." in name.split("/")
+
+
+def _safe_extract_zip(zip_bytes: bytes, dest_dir: Path) -> tuple[list[Path], list[dict]]:
+    """
+    Extract the images of a ZIP into dest_dir (folders flattened).
+    Returns (extracted image paths, skipped files as {name, reason}).
+    """
+    extracted: list[Path] = []
+    skipped: list[dict] = []
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         for member in zf.infolist():
-            safe_name = Path(member.filename).name
+            if member.is_dir() or _is_zip_junk(member.filename):
+                continue
+            safe_name = Path(member.filename.replace("\\", "/")).name
             if not safe_name:
                 continue
+            if _is_unsafe_zip_path(member.filename):
+                skipped.append({"name": member.filename, "reason": SKIP_UNSAFE})
+                continue
             if Path(safe_name).suffix.lower() not in ALLOWED_EXTS:
+                skipped.append({"name": member.filename, "reason": SKIP_TYPE})
                 continue
             if member.file_size > MAX_FILE_SIZE:
+                skipped.append({"name": member.filename, "reason": SKIP_SIZE})
                 continue
             target = (dest_dir / safe_name).resolve()
             if not str(target).startswith(str(dest_dir.resolve())):
-                continue  # path traversal guard
+                skipped.append({"name": member.filename, "reason": SKIP_UNSAFE})  # path traversal guard
+                continue
             with zf.open(member) as src, open(target, "wb") as dst:
                 dst.write(src.read())
+            if not _is_readable_image(target):
+                target.unlink(missing_ok=True)
+                skipped.append({"name": member.filename, "reason": SKIP_CORRUPT})
+                continue
             extracted.append(target)
-    return extracted
+    return extracted, skipped
+
+
+def _skipped_summary(skipped: list[dict], limit: int = 5) -> str:
+    """'a.pdf (unsupported file type); b.jpg (...)' — first `limit`, then 'and N more'."""
+    shown = "; ".join(f"{s['name']} ({s['reason']})" for s in skipped[:limit])
+    more = len(skipped) - limit
+    return shown + (f"; and {more} more" if more > 0 else "")
 
 
 def _get_batch_or_404(batch_id: int, db: Session) -> Batch:
@@ -143,6 +213,7 @@ def _build_summary(batch: Batch, db: Session) -> SummaryOut:
         threshold=threshold,
         duplicate_count=total_dups,
         overlap_pairs=batch.overlap_pairs,
+        failed_images=sum(1 for img in images if img.inference_failed),
         images=rows,
     )
 
@@ -216,7 +287,7 @@ def rename_batch(batch_id: int, payload: BatchRename, db: Session = Depends(get_
     return batch
 
 
-@router.post("/{batch_id}/upload", response_model=BatchOut)
+@router.post("/{batch_id}/upload", response_model=UploadOut)
 async def upload_images(
     batch_id: int,
     files: list[UploadFile] = File(...),
@@ -235,24 +306,45 @@ async def upload_images(
     dest_dir = _upload_dir(batch_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
     saved_paths: list[Path] = []
+    skipped: list[dict] = []   # every file NOT added, with the reason — returned to the user
 
     for upload in files:
         data = await upload.read()
-        ext = Path(upload.filename or "").suffix.lower()
+        name = Path(upload.filename or "").name or "(unnamed file)"
+        ext = Path(name).suffix.lower()
 
         if ext == ".zip":
-            extracted = _safe_extract_zip(data, dest_dir)
-            saved_paths.extend(extracted)
-        elif ext in ALLOWED_EXTS:
-            if len(data) > MAX_FILE_SIZE:
+            try:
+                extracted, zip_skipped = _safe_extract_zip(data, dest_dir)
+            except zipfile.BadZipFile:
+                skipped.append({"name": name, "reason": SKIP_BAD_ZIP})
                 continue
-            safe_name = Path(upload.filename).name
-            target = dest_dir / safe_name
+            saved_paths.extend(extracted)
+            skipped.extend({"name": f"{name}/{s['name']}", "reason": s["reason"]} for s in zip_skipped)
+        elif ext not in ALLOWED_EXTS:
+            skipped.append({"name": name, "reason": SKIP_TYPE})
+        elif len(data) > MAX_FILE_SIZE:
+            skipped.append({"name": name, "reason": SKIP_SIZE})
+        else:
+            target = dest_dir / name
             target.write_bytes(data)
+            if not _is_readable_image(target):
+                target.unlink(missing_ok=True)
+                skipped.append({"name": name, "reason": SKIP_CORRUPT})
+                continue
             saved_paths.append(target)
 
-    if not saved_paths:
-        raise HTTPException(status_code=400, detail="No valid image files found")
+    if skipped:
+        print(f"[upload] batch {batch_id}: skipped {len(skipped)} file(s): {_skipped_summary(skipped, 20)}")
+
+    # Large uploads through a tunnel arrive as several requests. Only fail when
+    # the batch would end up with no images at all; otherwise a request whose
+    # files were all skipped just reports them.
+    if not saved_paths and existing == 0:
+        detail = "No valid image files found"
+        if skipped:
+            detail += ". Skipped: " + _skipped_summary(skipped)
+        raise HTTPException(status_code=400, detail=detail)
 
     # Max MAX_IMAGES for the whole batch (across chunked requests). Refuse
     # instead of silently dropping the extra images, so the count is never
@@ -274,7 +366,7 @@ async def upload_images(
     batch.status = "pending"
     db.commit()
     db.refresh(batch)
-    return batch
+    return UploadOut(**BatchOut.model_validate(batch).model_dump(), skipped=skipped)
 
 
 @router.get("/{batch_id}/images", response_model=list[ImageListRow])
@@ -309,6 +401,7 @@ def list_images(batch_id: int, db: Session = Depends(get_db)):
             is_checked=img.is_checked,
             duplicate_count=dup_count,
             overlap_count=overlap_counts.get(img.id, 0),
+            inference_failed=bool(img.inference_failed),
         ))
 
     # Three-section sort:

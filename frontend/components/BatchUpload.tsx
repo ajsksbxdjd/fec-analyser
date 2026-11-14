@@ -1,13 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { UploadCloud } from "lucide-react";
+import { UploadCloud, AlertTriangle } from "lucide-react";
 import {
   createBatch,
   uploadImagesWithProgress,
   runInference,
   getBatchStatus,
 } from "@/lib/api";
+import type { SkippedFile } from "@/lib/types";
 
 interface Props {
   /** Called when inference finishes — parent navigates to the dashboard. */
@@ -25,6 +26,33 @@ function fmtDuration(secs: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+const SKIPPED_SHOWN = 5;
+
+/** Yellow notice listing files the backend did not add (upload still went ahead). */
+function SkippedWarning({ skipped }: { skipped: SkippedFile[] }) {
+  if (skipped.length === 0) return null;
+  const more = skipped.length - SKIPPED_SHOWN;
+  return (
+    <div className="w-full flex gap-2.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-left">
+      <AlertTriangle size={16} strokeWidth={2.25} className="text-amber-600 flex-shrink-0 mt-0.5" />
+      <div className="min-w-0 text-xs text-amber-900">
+        <p className="font-semibold">
+          {skipped.length} file{skipped.length !== 1 ? "s were" : " was"} skipped and won&apos;t be analysed
+        </p>
+        <ul className="mt-1 space-y-0.5">
+          {skipped.slice(0, SKIPPED_SHOWN).map((s, i) => (
+            <li key={`${s.name}-${i}`} className="truncate" title={`${s.name} — ${s.reason}`}>
+              <span className="font-medium">{s.name}</span>
+              <span className="text-amber-800/80"> — {s.reason}</span>
+            </li>
+          ))}
+          {more > 0 && <li className="text-amber-800/80">and {more} more</li>}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
 export default function BatchUpload({ onDone }: Props) {
   const [name, setName] = useState("");
   const [files, setFiles] = useState<File[]>([]);
@@ -34,6 +62,7 @@ export default function BatchUpload({ onDone }: Props) {
   const [clientElapsed, setClientElapsed] = useState(0);
   const [completedInfo, setCompletedInfo] = useState<{ elapsed: number; total: number } | null>(null);
   const [error, setError] = useState("");
+  const [skipped, setSkipped] = useState<SkippedFile[]>([]);
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -85,6 +114,7 @@ export default function BatchUpload({ onDone }: Props) {
       return;
     }
     setError("");
+    setSkipped([]);
 
     try {
       const batch = await createBatch(name.trim());
@@ -92,7 +122,8 @@ export default function BatchUpload({ onDone }: Props) {
 
       setStage("uploading");
       setUploadPct(0);
-      await uploadImagesWithProgress(batchId, files, setUploadPct);
+      const uploaded = await uploadImagesWithProgress(batchId, files, setUploadPct);
+      setSkipped(uploaded.skipped);  // shown on the processing screen; doesn't stop the run
 
       setStage("inferring");
       const progress = await runInference(batchId);
@@ -108,8 +139,9 @@ export default function BatchUpload({ onDone }: Props) {
             const elapsed = status.elapsed_seconds ?? clientElapsedRef.current;
             setCompletedInfo({ elapsed, total: status.image_count });
             setStage("completed");
-            // Brief completed flash before navigating
-            setTimeout(() => onDone(batchId), 1800);
+            // Brief completed flash before navigating — longer when the
+            // skipped-files warning is showing, so it can be read
+            setTimeout(() => onDone(batchId), uploaded.skipped.length ? 5000 : 1800);
           }
         } catch { /* keep polling */ }
       }, 1500);
@@ -247,6 +279,7 @@ export default function BatchUpload({ onDone }: Props) {
           {total > 0 ? `${done} / ${total} images` : "Starting…"}
           {clientElapsed > 0 && <span className="ml-2">· {fmtDuration(clientElapsed)}</span>}
         </p>
+        <SkippedWarning skipped={skipped} />
       </div>
     );
   }
@@ -259,6 +292,7 @@ export default function BatchUpload({ onDone }: Props) {
           Completed in {fmtDuration(completedInfo.elapsed)} · {completedInfo.total} images
         </p>
         <p className="text-xs text-slate-400">Opening dashboard…</p>
+        <SkippedWarning skipped={skipped} />
       </div>
     );
   }

@@ -50,6 +50,7 @@ export interface ImageListRow {
   is_checked: boolean;   // true = human explicitly marked this image as reviewed
   duplicate_count: number;
   overlap_count: number; // how many other images overlap this one
+  inference_failed: boolean; // YOLO could not process this image
 }
 
 export type OverlapStatus = "auto" | "confirmed" | "rejected";
@@ -82,6 +83,17 @@ export interface Batch {
   image_count: number;
   processed_count: number;
   confidence_threshold: number;
+}
+
+/** A file that was not added to the batch on upload, and why. */
+export interface SkippedFile {
+  name: string;
+  reason: string;
+}
+
+/** Upload response: the batch plus every skipped file (merged across chunked requests). */
+export interface UploadResult extends Batch {
+  skipped: SkippedFile[];
 }
 
 /** Batch row enriched with live EPG / severity for the Recent-analyses table. */
@@ -124,6 +136,7 @@ export interface Summary {
   threshold: number;
   duplicate_count: number;        // boxes excluded as cross-image duplicates
   overlap_pairs: number | null;   // confirmed overlapping image pairs; null = dedup never ran
+  failed_images: number;          // images YOLO could not process on the last run
   images: SummaryImageRow[];
 }
 

@@ -615,6 +615,12 @@ export default function DashboardPage() {
                   </span>
                 )}
               </p>
+              {summary.failed_images > 0 && (
+                <p className="text-sm mt-1 font-semibold text-red-700 tabular-nums">
+                  ⚠ {summary.failed_images} image{summary.failed_images !== 1 ? "s" : ""} could not be
+                  processed by the detector. Look for &quot;Could not process&quot; in the image list.
+                </p>
+              )}
               <p className={`text-xs mt-1 opacity-70 ${ic.text} tabular-nums`}>
                 {dedupState === "running"
                   ? "⏳ Overlap check in progress…"
@@ -790,6 +796,7 @@ export default function DashboardPage() {
             {imageDetail ? (
               <ImageAnnotator
                 imageSrc={`/uploads/${batchId}/${currentRow?.filename}`}
+                knownUnreadable={currentRow?.inference_failed}
                 detections={imageDetail.detections}
                 threshold={threshold}
                 addMode={addMode}
